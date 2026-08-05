@@ -1,0 +1,131 @@
+//@version=6
+indicator("Whales + RSI/ADX/DMI", shorttitle="whales+RSI", overlay=false)
+
+// ═══════════════════════════════════════════════
+// GRUPOS DE PARÁMETROS
+// ═══════════════════════════════════════════════
+gRSI   = "RSI"
+gDMI   = "ADX y DMI"
+gMOD   = "RSI Modificado (%B)"
+gWHALE = "Ballenas (Whales)"
+
+// ── RSI (compartido por el display y por las señales de ballena) ──
+rsiLengthInput  = input.int(14, minval=1, title="RSI: Longitud", group=gRSI)
+rsiSourceInput  = input.source(close, "RSI: Fuente", group=gRSI)
+maTypeInput     = input.string("SMA", title="Tipo de MA", options=["SMA","Bollinger Bands","EMA","SMMA (RMA)","WMA","VWMA"], group=gRSI)
+maLengthInput   = input.int(14, title="Longitud MA", group=gRSI)
+bbMultInput     = input.float(2.0, minval=0.001, maxval=50, title="Desv. Estándar BB (sobre RSI)", group=gRSI)
+overBoughtLevel = input.int(70, "Nivel Sobrecompra", minval=50, maxval=100, group=gRSI)
+overSoldLevel   = input.int(30, "Nivel Sobreventa",  minval=0,  maxval=50,  group=gRSI)
+
+// ── ADX y DMI (compartido) ──
+adxlen = input.int(14, title="ADX Smoothing", group=gDMI)
+dilen  = input.int(14, title="DI Length",     group=gDMI)
+
+// ── RSI Modificado (%B) ──
+mavLength = input.int(20, title="Longitud",      group=gMOD)
+mavSrc    = input.source(close, title="Fuente",  group=gMOD)
+mavMult   = input.float(2.0, title="Multiplicador", group=gMOD)
+
+// ── Ballenas: Bollinger de PRECIO + umbrales ──
+bb_len     = input.int(20, "BB Precio: Período", minval=5, group=gWHALE)
+bb_mult    = input.float(2.0, "BB Precio: Desviación", minval=0.5, step=0.1, group=gWHALE)
+whaleScale = input.float(10.0, "Intensidad ×", minval=1, step=1, group=gWHALE, tooltip="Multiplica la altura de las columnas de ballena para que sean visibles en el panel 0-100. Sube/baja según la volatilidad del activo.")
+whaleCap   = input.float(95.0, "Altura máxima columnas", minval=10, maxval=100, group=gWHALE)
+showMarks  = input.bool(true, "Mostrar marcas ▲▼", group=gWHALE)
+
+// Long (ballena comprando)
+rsi_max = input.float(40.0, "RSI máx (long)", minval=10, step=1.0, group=gWHALE)
+adx_max = input.float(28.0, "ADX máx (long)", minval=10, step=1.0, group=gWHALE)
+pdi_max = input.float(20.0, "+DI máx (long)", minval=5,  step=1.0, group=gWHALE)
+mdi_min = input.float(23.0, "-DI mín (long)", minval=10, step=1.0, group=gWHALE)
+// Short (ballena vendiendo)
+rsi_min   = input.float(60.0, "RSI mín (short)", minval=10, step=1.0, group=gWHALE)
+adx_max_s = input.float(28.0, "ADX máx (short)", minval=10, step=1.0, group=gWHALE)
+pdi_min_s = input.float(23.0, "+DI mín (short)", minval=5,  step=1.0, group=gWHALE)
+mdi_max_s = input.float(20.0, "-DI máx (short)", minval=5,  step=1.0, group=gWHALE)
+
+// ═══════════════════════════════════════════════
+// CÁLCULOS
+// ═══════════════════════════════════════════════
+
+// ── RSI clásico (manual: habilita MA y BB sobre el propio RSI) ──
+change = ta.change(rsiSourceInput)
+up     = ta.rma(math.max(change, 0), rsiLengthInput)
+down   = ta.rma(-math.min(change, 0), rsiLengthInput)
+rsi    = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+rsiMA  = switch maTypeInput
+    "SMA"        => ta.sma(rsi, maLengthInput)
+    "EMA"        => ta.ema(rsi, maLengthInput)
+    "SMMA (RMA)" => ta.rma(rsi, maLengthInput)
+    "WMA"        => ta.wma(rsi, maLengthInput)
+    "VWMA"       => ta.vwma(rsi, maLengthInput)
+    => na
+stdDev  = bbMultInput * ta.stdev(rsi, maLengthInput)
+bbUpper = maTypeInput == "Bollinger Bands" ? rsiMA + stdDev : na
+bbLower = maTypeInput == "Bollinger Bands" ? rsiMA - stdDev : na
+
+// ── RSI Modificado (%B) ──
+basis = ta.sma(mavSrc, mavLength)
+dev   = mavMult * ta.stdev(mavSrc, mavLength)
+upper = basis + dev
+lower = basis - dev
+b_percent        = (mavSrc - lower) / (upper - lower) * 100
+scaled_b_percent = b_percent * 0.5 + 25   // reescalado visual al rango ~25-75
+
+// ── ADX y DMI (built-in, compartido por display y ballenas) ──
+[plusDI, minusDI, adxVal] = ta.dmi(dilen, adxlen)
+
+// ── Bollinger de PRECIO (solo para las condiciones de ballena, NO se plotea) ──
+[bb_mid, price_bb_upper, price_bb_lower] = ta.bb(close, bb_len, bb_mult)
+
+// ═══════════════════════════════════════════════
+// CONDICIONES DE BALLENA
+// ═══════════════════════════════════════════════
+signal_long  = low  <= price_bb_lower and rsi < rsi_max   and plusDI < pdi_max  and minusDI > mdi_min  and adxVal < adx_max
+signal_short = high >= price_bb_upper and rsi > rsi_min   and plusDI > pdi_min_s and minusDI < mdi_max_s and adxVal < adx_max_s
+
+// Intensidad = distancia % fuera de la banda
+dist_long  = signal_long  ? math.max(price_bb_lower - close, 0) / price_bb_lower * 100 : 0
+dist_short = signal_short ? math.max(close - price_bb_upper, 0) / price_bb_upper * 100 : 0
+
+// Altura reescalada al panel 0-100 (columnas desde 0; long/short son mutuamente excluyentes)
+whale_buy  = signal_long  ? math.min(math.max(dist_long,  0.1) * whaleScale, whaleCap) : na
+whale_sell = signal_short ? math.min(math.max(dist_short, 0.1) * whaleScale, whaleCap) : na
+
+// ═══════════════════════════════════════════════
+// VISUALIZACIÓN
+// ═══════════════════════════════════════════════
+
+// Columnas de ballena (semitransparentes para no tapar las líneas)
+plot(whale_buy,  title="Ballena Comprando", style=plot.style_columns, color=color.new(#00E676, 55))
+plot(whale_sell, title="Ballena Vendiendo", style=plot.style_columns, color=color.new(#FF1744, 55))
+
+// Marcas que indican el lado: ▲ compra abajo, ▼ venta arriba
+plotshape(showMarks and signal_long  ? 3  : na, title="▲ Compra ballena", style=shape.triangleup,   location=location.absolute, color=color.new(#00E676, 0), size=size.tiny)
+plotshape(showMarks and signal_short ? 97 : na, title="▼ Venta ballena",  style=shape.triangledown, location=location.absolute, color=color.new(#FF1744, 0), size=size.tiny)
+
+// Fondo sobrecompra/sobreventa (RSI clásico)
+bgcolor(rsi > overBoughtLevel ? color.new(color.red, 92)   : na, title="Área Sobrecompra")
+bgcolor(rsi < overSoldLevel   ? color.new(color.green, 92) : na, title="Área Sobreventa")
+
+// RSI clásico + MA + BB sobre el RSI
+rsiColor = rsi > overBoughtLevel ? color.new(color.red, 0) : rsi < overSoldLevel ? color.new(color.green, 0) : color.new(#7E57C2, 0)
+plot(rsi,   "RSI Clásico", color=rsiColor, linewidth=2)
+plot(rsiMA, "MA del RSI",  color=color.new(color.yellow, 0))
+p_bbU = plot(bbUpper, "BB Superior (RSI)", color=color.new(color.green, 50))
+p_bbL = plot(bbLower, "BB Inferior (RSI)", color=color.new(color.green, 50))
+fill(p_bbU, p_bbL, color=color.new(color.green, 90))
+
+// RSI Modificado (%B escalado)
+plot(scaled_b_percent, "RSI Modificado (%B)", color=color.new(color.blue, 0), linewidth=2)
+
+// ADX y DMI
+plot(adxVal,  "ADX", color=color.new(color.red, 0),  linewidth=1)
+plot(plusDI,  "+DI", color=color.new(#2962FF, 0),    linewidth=1)
+plot(minusDI, "-DI", color=color.new(#FF6D00, 0),    linewidth=1)
+
+// Niveles de referencia
+hline(overBoughtLevel, "Sobrecompra", color=color.new(color.red, 50))
+hline(overSoldLevel,   "Sobreventa",  color=color.new(color.green, 50))
+hline(50, "Media", color=color.new(color.gray, 50), linestyle=hline.style_dotted)

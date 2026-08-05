@@ -1,0 +1,601 @@
+//@version=6
+// Thanks to the following Tradingview community members for providing open source indicators that I used to develop this indicator!!
+// Liquidations - @Mysterysauce
+// Open Interest Delta - By Leviathan - @LeviathanCapital
+//
+// This indicator uses OI delta to determine potential liquidaiton levels. We provide a density histogram to display the liquidation density of each price ran//@version=6
+// Thanks to the following Tradingview community members for providing open source indicators that I used to develop this indicator!!
+// Liquidations - @Mysterysauce
+// Open Interest Delta - By Leviathan - @LeviathanCapital
+//
+// This indicator uses OI delta to determine potential liquidaiton levels. We provide a density histogram to display the liquidation density of each price range.
+
+indicator('LqEMABB', overlay=true, max_lines_count=500, max_boxes_count=120, max_labels_count=1)
+
+string userSymbol = 'BINANCE' + ":" + string(syminfo.basecurrency) + 'USDT.P'
+string Formula = str.format("{0}_OI", userSymbol)
+OI = request.security(Formula, timeframe.period, close)
+OI_delta = OI - nz(OI[1])
+
+maLength = input(60, title="MA Length")
+numOfLines = 500
+
+OI_delta_MA = ta.sma(OI_delta, maLength)
+OI_delta_abs = math.abs(OI_delta)
+OI_delta_abs_MA = ta.sma(OI_delta_abs, maLength)
+
+h3 = input(3.0, title="Large Liquidation Level")
+h2 = input(2.0, title="Middle Liquidation Level")
+h1 = input(1.2, title="Small Liquidation Level")
+
+OI_delta_open_h3 = (OI_delta_abs >= OI_delta_abs_MA * h3) and OI_delta > 0
+OI_delta_open_h2 = (OI_delta_abs >= OI_delta_abs_MA * h2 and OI_delta_abs < OI_delta_abs_MA * h3) and OI_delta > 0
+OI_delta_open_h1 = (OI_delta_abs >= OI_delta_abs_MA * h1 and OI_delta_abs < OI_delta_abs_MA * h2) and OI_delta > 0
+
+kline_price = (open + close + high + low) / 4
+
+showLine = input(true, title="Show lines")
+showHist = input(true, title="Show histgram")
+showLocalOnly = input(true, title="Only show local liquidation levels")
+
+i_5xColor = input.color(color.rgb(179, 181, 190, 25), '5x Leverage color', group='5x Leverage')
+i_10xColor = input.color(color.rgb(1, 124, 255, 30), '10x Leverage color', group='10x Leverage')
+i_25xColor = input.color(color.rgb(91, 176, 86, 30), '25x Leverage color', group='25x Leverage')
+i_50xColor = input.color(color.rgb(240, 161, 41, 30), '50x Leverage color', group='50x Leverage')
+i_100xColor = input.color(color.rgb(218, 55, 101, 30), '100x Leverage color', group='100x Leverage')
+
+var h3Array = array.new_line()
+var h2Array = array.new_line()
+var h1Array = array.new_line()
+
+// histgram
+barColor = input(color.rgb(120, 123, 134, 50), "Bar Color")
+numOfBars = input(120, 'Number of bars to lookback')
+distLastCandle = input(5, 'Histgram distance from last candle')
+local_high = ta.highest(high, numOfBars)
+local_low = ta.lowest(low, numOfBars)
+rangeHigh = local_high * (1 + local_high / local_low / 10)
+rangeLow = local_low * (1 - local_high / local_low / 10)
+rangeHeight = rangeHigh - rangeLow
+
+numOfHistograms = input(120, 'Number of histograms (<=120)')
+histogramHeight = rangeHeight / numOfHistograms
+
+histogramLowList = array.new_float(numOfHistograms, na)
+histogramHighList = array.new_float(numOfHistograms, na)
+
+histogramData = array.new_float()
+histogramtargetList = array.new_float(numOfHistograms, 0.0)
+
+var Bars = array.new_box(numOfHistograms, na)
+// Clean up drawings every tick
+for i=0 to numOfHistograms - 1
+    box.delete(array.get(Bars, i))
+
+f_drawLine(_x1, _x2, _yValue, _lineColor, _style, _width) =>
+    line.new(x1=_x1, y1=_yValue, x2=_x2, y2=_yValue, color=_lineColor, style=_style, width=_width)
+
+f_extendArray(_lineArray, _extendLines) =>
+    if array.size(_lineArray) > 0
+        for _i = array.size(_lineArray) - 1 to 0 by 1
+
+            x2 = line.get_x2(array.get(_lineArray, _i))
+            yValue = line.get_y1(array.get(_lineArray, _i))
+
+            if _extendLines or bar_index - 1 == x2 - 1 and not(high > yValue and low < yValue)
+                line.set_x2(array.get(_lineArray, _i), bar_index + 1)
+                if bar_index == last_bar_index
+                    array.push(histogramData, yValue)
+
+f_calculateLeverage100x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.01) : _pivotValue * (1 + 0.01)
+
+f_calculateLeverage50x( _pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.02) : _pivotValue * (1 + 0.02)
+
+f_calculateLeverage25x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.04) : _pivotValue * (1 + 0.04)
+
+f_calculateLeverage10x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.1) : _pivotValue * (1 + 0.1)
+
+f_calculateLeverage5x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.2) : _pivotValue * (1 + 0.2)
+
+float yValue = na
+int x1 = na
+int x2 = na
+line l = na
+
+x1 := bar_index
+x2 := bar_index
+
+f_append(Array, l) =>
+    if array.size(Array) == numOfLines
+        line.delete(array.shift(Array))
+    array.push(Array, l)
+
+if OI_delta_open_h3
+    yValue := f_calculateLeverage5x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_5xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage5x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_5xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage10x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage10x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+if OI_delta_open_h2
+    yValue := f_calculateLeverage10x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage10x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+if OI_delta_open_h1
+    yValue := f_calculateLeverage25x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+f_extendArray(h3Array, false)
+f_extendArray(h2Array, false)
+f_extendArray(h1Array, false)
+
+// draw hist
+if barstate.islast and showHist
+    // Define lows and highs of the histograms
+    for i = 0 to numOfHistograms - 1
+        histogramLow = rangeLow + histogramHeight * i
+        histogramHigh = rangeLow + histogramHeight * (i + 1)
+        array.set(histogramLowList, i, histogramLow)
+        array.set(histogramHighList, i, histogramHigh)
+
+    for i = 0 to array.size(histogramData) - 1
+        y = array.get(histogramData, i)
+
+        for j = 0 to numOfHistograms - 1
+            histogramLow = array.get(histogramLowList, j)
+            histogramHigh = array.get(histogramHighList, j)
+            if y >= histogramLow and y <= histogramHigh
+                array.set(histogramtargetList, j, array.get(histogramtargetList, j) + 1)
+
+    for i = 0 to numOfHistograms - 1
+        histogramLow = array.get(histogramLowList, i)
+        histogramHigh = array.get(histogramHighList, i)
+        histogramtarget = array.get(histogramtargetList, i)
+        histogramWidth = math.floor((histogramtarget + 0.49) * 2)
+
+        // Draw histograms
+        array.set(Bars, i, box.new(left=bar_index + distLastCandle, top=histogramHigh, right=bar_index + distLastCandle + histogramWidth, bottom=histogramLow, bgcolor=barColor, border_color=barColor))
+
+
+if barstate.islast and not showLine
+    for i=0 to array.size(h3Array) - 1
+        line.delete(array.get(h3Array, i))
+
+    for i=0 to array.size(h2Array) - 1
+        line.delete(array.get(h2Array, i))
+
+    for i=0 to array.size(h1Array) - 1
+        line.delete(array.get(h1Array, i))
+
+else if barstate.islast and showLocalOnly
+    for i=0 to array.size(h3Array) - 1
+        if line.get_y1(array.get(h3Array, i)) < rangeLow or line.get_y1(array.get(h3Array, i)) > rangeHigh
+            line.delete(array.get(h3Array, i))
+
+    for i=0 to array.size(h2Array) - 1
+        if line.get_y1(array.get(h2Array, i)) < rangeLow or line.get_y1(array.get(h2Array, i)) > rangeHigh
+            line.delete(array.get(h2Array, i))
+
+    for i=0 to array.size(h1Array) - 1
+        if line.get_y1(array.get(h1Array, i)) < rangeLow or line.get_y1(array.get(h1Array, i)) > rangeHigh
+            line.delete(array.get(h1Array, i))
+
+// =================== EMAs ===================
+shortest = ta.ema(close, 4)
+short = ta.ema(close, 9)
+longer = ta.ema(close, 18)
+longest = ta.ema(close, 100)
+
+plot(shortest, color=color.aqua, title="EMA 20", linewidth=1)
+plot(short, color=color.white, title="EMA 50", linewidth=1)
+plot(longer, color=color.yellow, title="EMA 100", linewidth=1)
+plot(longest, color=color.red, title="EMA 200", linewidth=1)
+
+// =================== BOLLINGER BANDS ===================
+bb_length = input.int(20, minval=1, title="BB Length", group="Bollinger Bands")
+bb_maType = input.string("SMA", "BB Basis MA Type", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Bollinger Bands")
+bb_src = input(close, title="BB Source", group="Bollinger Bands")
+bb_mult = input.float(2.0, minval=0.001, maxval=50, title="BB StdDev", group="Bollinger Bands")
+bb_offset = input.int(0, "BB Offset", minval = -500, maxval = 500, group="Bollinger Bands")
+
+ma(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+bb_basis = ma(bb_src, bb_length, bb_maType)
+bb_dev = bb_mult * ta.stdev(bb_src, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+plot(bb_basis, "BB Basis", color=#2962FF, offset = bb_offset)
+bb_p1 = plot(bb_upper, "BB Upper", color=#F23645, offset = bb_offset)
+bb_p2 = plot(bb_lower, "BB Lower", color=#089981, offset = bb_offset)
+fill(bb_p1, bb_p2, title = "BB Background", color=color.rgb(33, 150, 243, 95))ge.
+
+indicator('LqEMABB', overlay=true, max_lines_count=500, max_boxes_count=120, max_labels_count=1)
+
+string userSymbol = 'BINANCE' + ":" + string(syminfo.basecurrency) + 'USDT.P'
+string Formula = str.format("{0}_OI", userSymbol)
+OI = request.security(Formula, timeframe.period, close)
+OI_delta = OI - nz(OI[1])
+
+maLength = input(60, title="MA Length")
+numOfLines = 500
+
+OI_delta_MA = ta.sma(OI_delta, maLength)
+OI_delta_abs = math.abs(OI_delta)
+OI_delta_abs_MA = ta.sma(OI_delta_abs, maLength)
+
+h3 = input(3.0, title="Large Liquidation Level")
+h2 = input(2.0, title="Middle Liquidation Level")
+h1 = input(1.2, title="Small Liquidation Level")
+
+OI_delta_open_h3 = (OI_delta_abs >= OI_delta_abs_MA * h3) and OI_delta > 0
+OI_delta_open_h2 = (OI_delta_abs >= OI_delta_abs_MA * h2 and OI_delta_abs < OI_delta_abs_MA * h3) and OI_delta > 0
+OI_delta_open_h1 = (OI_delta_abs >= OI_delta_abs_MA * h1 and OI_delta_abs < OI_delta_abs_MA * h2) and OI_delta > 0
+
+kline_price = (open + close + high + low) / 4
+
+showLine = input(true, title="Show lines")
+showHist = input(true, title="Show histgram")
+showLocalOnly = input(true, title="Only show local liquidation levels")
+
+i_5xColor = input.color(color.rgb(179, 181, 190, 25), '5x Leverage color', group='5x Leverage')
+i_10xColor = input.color(color.rgb(1, 124, 255, 30), '10x Leverage color', group='10x Leverage')
+i_25xColor = input.color(color.rgb(91, 176, 86, 30), '25x Leverage color', group='25x Leverage')
+i_50xColor = input.color(color.rgb(240, 161, 41, 30), '50x Leverage color', group='50x Leverage')
+i_100xColor = input.color(color.rgb(218, 55, 101, 30), '100x Leverage color', group='100x Leverage')
+
+var h3Array = array.new_line()
+var h2Array = array.new_line()
+var h1Array = array.new_line()
+
+// histgram
+barColor = input(color.rgb(120, 123, 134, 50), "Bar Color")
+numOfBars = input(120, 'Number of bars to lookback')
+distLastCandle = input(5, 'Histgram distance from last candle')
+local_high = ta.highest(high, numOfBars)
+local_low = ta.lowest(low, numOfBars)
+rangeHigh = local_high * (1 + local_high / local_low / 10)
+rangeLow = local_low * (1 - local_high / local_low / 10)
+rangeHeight = rangeHigh - rangeLow
+
+numOfHistograms = input(120, 'Number of histograms (<=120)')
+histogramHeight = rangeHeight / numOfHistograms
+
+histogramLowList = array.new_float(numOfHistograms, na)
+histogramHighList = array.new_float(numOfHistograms, na)
+
+histogramData = array.new_float()
+histogramtargetList = array.new_float(numOfHistograms, 0.0)
+
+var Bars = array.new_box(numOfHistograms, na)
+// Clean up drawings every tick
+for i=0 to numOfHistograms - 1
+    box.delete(array.get(Bars, i))
+
+f_drawLine(_x1, _x2, _yValue, _lineColor, _style, _width) =>
+    line.new(x1=_x1, y1=_yValue, x2=_x2, y2=_yValue, color=_lineColor, style=_style, width=_width)
+
+f_extendArray(_lineArray, _extendLines) =>
+    if array.size(_lineArray) > 0
+        for _i = array.size(_lineArray) - 1 to 0 by 1
+
+            x2 = line.get_x2(array.get(_lineArray, _i))
+            yValue = line.get_y1(array.get(_lineArray, _i))
+
+            if _extendLines or bar_index - 1 == x2 - 1 and not(high > yValue and low < yValue)
+                line.set_x2(array.get(_lineArray, _i), bar_index + 1)
+                if bar_index == last_bar_index
+                    array.push(histogramData, yValue)
+
+f_calculateLeverage100x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.01) : _pivotValue * (1 + 0.01)
+
+f_calculateLeverage50x( _pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.02) : _pivotValue * (1 + 0.02)
+
+f_calculateLeverage25x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.04) : _pivotValue * (1 + 0.04)
+
+f_calculateLeverage10x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.1) : _pivotValue * (1 + 0.1)
+
+f_calculateLeverage5x(_pivotValue, _shortSell) =>
+    _shortSell ? _pivotValue * (1 - 0.2) : _pivotValue * (1 + 0.2)
+
+float yValue = na
+int x1 = na
+int x2 = na
+line l = na
+
+x1 := bar_index
+x2 := bar_index
+
+f_append(Array, l) =>
+    if array.size(Array) == numOfLines
+        line.delete(array.shift(Array))
+    array.push(Array, l)
+
+if OI_delta_open_h3
+    yValue := f_calculateLeverage5x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_5xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage5x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_5xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage10x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage10x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h3Array, l)
+
+if OI_delta_open_h2
+    yValue := f_calculateLeverage10x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage10x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_10xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_solid, 1)
+    f_append(h2Array, l)
+
+if OI_delta_open_h1
+    yValue := f_calculateLeverage25x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage25x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_25xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage50x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_50xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, true)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+    yValue := f_calculateLeverage100x(kline_price, false)
+    l := f_drawLine(x1, x2, yValue, i_100xColor, line.style_dotted, 1)
+    f_append(h1Array, l)
+
+f_extendArray(h3Array, false)
+f_extendArray(h2Array, false)
+f_extendArray(h1Array, false)
+
+// draw hist
+if barstate.islast and showHist
+    // Define lows and highs of the histograms
+    for i = 0 to numOfHistograms - 1
+        histogramLow = rangeLow + histogramHeight * i
+        histogramHigh = rangeLow + histogramHeight * (i + 1)
+        array.set(histogramLowList, i, histogramLow)
+        array.set(histogramHighList, i, histogramHigh)
+
+    for i = 0 to array.size(histogramData) - 1
+        y = array.get(histogramData, i)
+
+        for j = 0 to numOfHistograms - 1
+            histogramLow = array.get(histogramLowList, j)
+            histogramHigh = array.get(histogramHighList, j)
+            if y >= histogramLow and y <= histogramHigh
+                array.set(histogramtargetList, j, array.get(histogramtargetList, j) + 1)
+
+    for i = 0 to numOfHistograms - 1
+        histogramLow = array.get(histogramLowList, i)
+        histogramHigh = array.get(histogramHighList, i)
+        histogramtarget = array.get(histogramtargetList, i)
+        histogramWidth = math.floor((histogramtarget + 0.49) * 2)
+
+        // Draw histograms
+        array.set(Bars, i, box.new(left=bar_index + distLastCandle, top=histogramHigh, right=bar_index + distLastCandle + histogramWidth, bottom=histogramLow, bgcolor=barColor, border_color=barColor))
+
+
+if barstate.islast and not showLine
+    for i=0 to array.size(h3Array) - 1
+        line.delete(array.get(h3Array, i))
+
+    for i=0 to array.size(h2Array) - 1
+        line.delete(array.get(h2Array, i))
+
+    for i=0 to array.size(h1Array) - 1
+        line.delete(array.get(h1Array, i))
+
+else if barstate.islast and showLocalOnly
+    for i=0 to array.size(h3Array) - 1
+        if line.get_y1(array.get(h3Array, i)) < rangeLow or line.get_y1(array.get(h3Array, i)) > rangeHigh
+            line.delete(array.get(h3Array, i))
+
+    for i=0 to array.size(h2Array) - 1
+        if line.get_y1(array.get(h2Array, i)) < rangeLow or line.get_y1(array.get(h2Array, i)) > rangeHigh
+            line.delete(array.get(h2Array, i))
+
+    for i=0 to array.size(h1Array) - 1
+        if line.get_y1(array.get(h1Array, i)) < rangeLow or line.get_y1(array.get(h1Array, i)) > rangeHigh
+            line.delete(array.get(h1Array, i))
+
+// =================== EMAs ===================
+shortest = ta.ema(close, 4)
+short = ta.ema(close, 9)
+longer = ta.ema(close, 18)
+longest = ta.ema(close, 100)
+
+plot(shortest, color=color.aqua, title="EMA 20", linewidth=1)
+plot(short, color=color.white, title="EMA 50", linewidth=1)
+plot(longer, color=color.yellow, title="EMA 100", linewidth=1)
+plot(longest, color=color.red, title="EMA 200", linewidth=1)
+
+// =================== BOLLINGER BANDS ===================
+bb_length = input.int(20, minval=1, title="BB Length", group="Bollinger Bands")
+bb_maType = input.string("SMA", "BB Basis MA Type", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Bollinger Bands")
+bb_src = input(close, title="BB Source", group="Bollinger Bands")
+bb_mult = input.float(2.0, minval=0.001, maxval=50, title="BB StdDev", group="Bollinger Bands")
+bb_offset = input.int(0, "BB Offset", minval = -500, maxval = 500, group="Bollinger Bands")
+
+ma(source, length, _type) =>
+    switch _type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+bb_basis = ma(bb_src, bb_length, bb_maType)
+bb_dev = bb_mult * ta.stdev(bb_src, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+
+plot(bb_basis, "BB Basis", color=#2962FF, offset = bb_offset)
+bb_p1 = plot(bb_upper, "BB Upper", color=#F23645, offset = bb_offset)
+bb_p2 = plot(bb_lower, "BB Lower", color=#089981, offset = bb_offset)
+fill(bb_p1, bb_p2, title = "BB Background", color=color.rgb(33, 150, 243, 95))

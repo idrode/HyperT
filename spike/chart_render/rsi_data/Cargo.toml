@@ -1,0 +1,7 @@
+[package]
+name = "rsi_data"
+version = "0.1.0"
+edition = "2021"
+description = "Datos RSI sintéticos compartidos por los dos candidatos del spike"
+
+[dependencies]

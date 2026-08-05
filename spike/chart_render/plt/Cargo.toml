@@ -1,0 +1,12 @@
+[package]
+name = "plt"
+version = "0.1.0"
+edition = "2021"
+description = "Candidato B: LinePlot de ratatui-plt (braille en vivo; kitty solo como export offline)"
+
+[dependencies]
+rsi_data = { path = "../rsi_data" }
+ratatui = "0.30"
+crossterm = "0.29"
+ratatui-plt = { version = "0.0.2", features = ["kitty"] }
+anyhow = "1"

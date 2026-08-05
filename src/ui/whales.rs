@@ -1,0 +1,248 @@
+use std::collections::HashMap;
+
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
+
+use crate::app::App;
+use crate::data::types::PosInfo;
+
+use super::fmt::{fmt_px, fmt_usd, sign_color};
+
+fn short_addr(a: &str) -> String {
+    if a.len() > 12 {
+        format!("{}…{}", &a[..6], &a[a.len() - 4..])
+    } else {
+        a.to_string()
+    }
+}
+
+pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
+    let rows_layout = Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).split(area);
+
+    draw_summary(f, app, rows_layout[0]);
+    draw_table(f, app, rows_layout[1]);
+
+    if app.whale_modal.is_some() {
+        app.overlay_drawn.set(true);
+        draw_addr_modal(f, app, area);
+    }
+}
+
+/// Modal con la dirección completa de la whale seleccionada, para copiarla
+/// (a mano o con `c` vía OSC 52) y pegarla en la Vista 9 (wallet watch-only).
+fn draw_addr_modal(f: &mut Frame, app: &App, area: Rect) {
+    let (addr, feedback) = match &app.whale_modal {
+        Some(m) => m,
+        None => return,
+    };
+    let w = (addr.len() as u16 + 6).max(46).min(area.width);
+    let h = 7u16.min(area.height);
+    let r = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(h)) / 2,
+        w,
+        h,
+    );
+    f.render_widget(Clear, r);
+
+    let s = crate::i18n::t();
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut lines = vec![
+        Line::from(Span::styled(s.wh_modal_full_addr, dim)),
+        Line::from(Span::styled(
+            addr.clone(),
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    match feedback {
+        Some(msg) => lines.push(Line::from(Span::styled(
+            msg.clone(),
+            Style::new().fg(Color::Green),
+        ))),
+        None => lines.push(Line::from(Span::styled(s.wh_modal_copy_hint, dim))),
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(s.wh_modal_title)
+                .border_style(Style::new().fg(Color::Cyan)),
+        ),
+        r,
+    );
+}
+
+fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
+    let mut long_ntl = 0.0;
+    let mut short_ntl = 0.0;
+    let mut by_coin: HashMap<&str, (f64, f64)> = HashMap::new();
+    for w in &app.whales {
+        for p in &w.positions {
+            let e = by_coin.entry(p.coin.as_str()).or_insert((0.0, 0.0));
+            if p.szi >= 0.0 {
+                long_ntl += p.position_value;
+                e.0 += p.position_value;
+            } else {
+                short_ntl += p.position_value;
+                e.1 += p.position_value;
+            }
+        }
+    }
+    let total = long_ntl + short_ntl;
+    let bias = if total > 0.0 {
+        (long_ntl - short_ntl) / total * 100.0
+    } else {
+        0.0
+    };
+    let mut top: Vec<(&str, (f64, f64))> = by_coin.into_iter().collect();
+    top.sort_by(|a, b| {
+        (b.1 .0 + b.1 .1)
+            .partial_cmp(&(a.1 .0 + a.1 .1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let tr = crate::i18n::t();
+
+    let mut concentr: Vec<Span> = vec![dim(tr.wh_by_pair.to_string())];
+    for (coin, (l, s)) in top.iter().take(4) {
+        let t = l + s;
+        let lpct = if t > 0.0 { l / t * 100.0 } else { 0.0 };
+        concentr.push(Span::styled(
+            format!("{coin} "),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        concentr.push(Span::styled(
+            format!("L{lpct:.0}%"),
+            Style::new().fg(Color::Green),
+        ));
+        concentr.push(dim(format!("/{} · ", fmt_usd(t))));
+    }
+
+    let status = match (&app.whale_status, app.whales_at) {
+        (_, Some(t)) => format!(
+            "{} {} · {} {}s",
+            app.whales.len(),
+            tr.wh_accounts_pos,
+            tr.wh_refresh_ago,
+            t.elapsed().as_secs()
+        ),
+        (Some(s), None) => s.clone(),
+        (None, None) => tr.wh_starting.to_string(),
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            dim(format!("Σ {} ", tr.wh_long)),
+            Span::styled(fmt_usd(long_ntl), Style::new().fg(Color::Green)),
+            dim(format!("   Σ {} ", tr.wh_short)),
+            Span::styled(fmt_usd(short_ntl), Style::new().fg(Color::Red)),
+            dim(format!("   {} ", tr.wh_bias)),
+            Span::styled(
+                format!("{bias:+.1}% "),
+                Style::new().fg(sign_color(Some(bias), false)),
+            ),
+            dim(format!("· {status}")),
+        ]),
+        Line::from(concentr),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(tr.wh_title)),
+        area,
+    );
+}
+
+fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
+    // filas aplanadas (whale, posición), ordenadas por notional desc
+    let mut flat: Vec<(&str, f64, &PosInfo)> = app
+        .whales
+        .iter()
+        .flat_map(|w| {
+            w.positions
+                .iter()
+                .map(move |p| (w.addr.as_str(), w.account_value, p))
+        })
+        .collect();
+    flat.sort_by(|a, b| {
+        b.2.position_value
+            .partial_cmp(&a.2.position_value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let tr = crate::i18n::t();
+    let header_style = Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD);
+    let header = Row::new(vec![
+        tr.wh_col_account,
+        tr.wh_col_value,
+        tr.rk_col_pair,
+        tr.wh_col_side,
+        "Ntl $",
+        tr.wh_col_entry,
+        "Liq",
+        "Lev",
+        "uPnL $",
+        "ROE%",
+    ])
+    .style(header_style);
+
+    let rows: Vec<Row> = flat
+        .iter()
+        .map(|(addr, acct, p)| {
+            let long = p.szi >= 0.0;
+            let side = if long { "LONG" } else { "SHORT" };
+            let side_color = if long { Color::Green } else { Color::Red };
+            let lev = format!("{}×{}", p.leverage, if p.is_cross { "c" } else { "i" });
+            Row::new(vec![
+                Cell::from(short_addr(addr)).style(Style::new().fg(Color::Cyan)),
+                Cell::from(fmt_usd(*acct)),
+                Cell::from(p.coin.clone()).style(Style::new().add_modifier(Modifier::BOLD)),
+                Cell::from(side).style(Style::new().fg(side_color).add_modifier(Modifier::BOLD)),
+                Cell::from(fmt_usd(p.position_value)),
+                Cell::from(p.entry_px.map(fmt_px).unwrap_or_else(|| "—".into())),
+                Cell::from(p.liq_px.map(fmt_px).unwrap_or_else(|| "—".into()))
+                    .style(Style::new().fg(Color::Yellow)),
+                Cell::from(lev),
+                Cell::from(fmt_usd(p.unrealized_pnl))
+                    .style(Style::new().fg(sign_color(Some(p.unrealized_pnl), false))),
+                Cell::from(format!("{:+.1}", p.roe * 100.0))
+                    .style(Style::new().fg(sign_color(Some(p.roe), false))),
+            ])
+        })
+        .collect();
+
+    let n = rows.len();
+    let widths = [
+        Constraint::Length(12),
+        Constraint::Length(8),
+        Constraint::Length(7),
+        Constraint::Length(6),
+        Constraint::Length(9),
+        Constraint::Length(11),
+        Constraint::Length(11),
+        Constraint::Length(5),
+        Constraint::Length(9),
+        Constraint::Length(7),
+    ];
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::bordered().title(format!(" {n} {} ", tr.wh_positions_hint)))
+        .row_highlight_style(
+            Style::new()
+                .bg(Color::Rgb(40, 44, 66))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶");
+    app.whales_state.select(if n == 0 {
+        None
+    } else {
+        Some(app.whale_sel.min(n - 1))
+    });
+    // Zona de datos (dentro del borde + fila de cabecera) para mapear clicks.
+    let inner = area.inner(Margin::new(1, 1));
+    app.whale_rows_area = Some(Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    ));
+    f.render_stateful_widget(table, area, &mut app.whales_state);
+}

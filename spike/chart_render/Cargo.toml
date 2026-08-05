@@ -1,0 +1,6 @@
+## Spike aislado (CLAUDE.md "Spike previo: renderizado real vía protocolo gráfico Kitty").
+## Workspace con crates separados por candidato; ambos exigen ratatui 0.30
+## (producción está en 0.29 — la adopción de cualquiera implica esa subida).
+[workspace]
+resolver = "2"
+members = ["rsi_data", "img_plotters", "plt"]

@@ -1,0 +1,23 @@
+[package]
+name = "wc-sign-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Spike aislado Fase 2: pairing WalletConnect v2 con MetaMask + personal_sign de prueba (sin transacciones)"
+publish = false
+
+[dependencies]
+# rol wallet ya implementado; reutilizamos su relay/cripto/tipos para montar el rol dApp
+walletconnect-sdk = "0.2.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# el relay oficial ya solo habla WebSocket (su endpoint HTTP /rpc devuelve 404 desde 2026)
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+alloy = { version = "1", features = ["full"] }
+serde = "1"
+serde_json = "1"
+anyhow = "1"
+qrcode = "0.14"
+rand = "0.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+log = "0.4"
+env_logger = "0.11"

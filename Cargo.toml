@@ -1,0 +1,55 @@
+[package]
+name = "hypert"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "TUI de análisis para Hyperliquid DEX — Fase 1: solo lectura (Info API + WebSocket)"
+
+[dependencies]
+# crates.io 0.6.0 no expone metaAndAssetCtxs de perps; pineado a master
+hyperliquid_rust_sdk = { git = "https://github.com/hyperliquid-dex/hyperliquid-rust-sdk", rev = "aac75585daf12d0a3761126cc7da7a5e035b5853" }
+ratatui = "0.30"
+crossterm = "0.29"
+# indicadores como imagen real (protocolo Kitty, fallback halfblocks) — ganador
+# del spike/chart_render; default-features off: "chafa-dyn" exige libchafa
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false }
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "line_series"] }
+# hora local del hover en velas/indicadores; ya venía compilado como transitiva
+chrono = "0.4"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+# whale positioning / wallet watch-only: leaderboard por HTTP y tipo Address del SDK
+alloy-primitives = "1"
+# panel de ejecución real (paso 7): PrivateKeySigner de la agent wallet — misma
+# versión/features que el SDK pineado para que cargo unifique el crate
+alloy = { version = "1.0", default-features = false, features = ["signer-local"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
+# el probe expone los error!/warn! internos del SDK (reconexiones WS)
+log = "0.4"
+# Vista 8 (Fondos): WalletConnect v2 rol dApp — transporte WS propio + cripto
+# vendorizada (el relay oficial ya no habla HTTP y no existe crate dApp nativo,
+# ver spike/wc_sign y CLAUDE.md Fase 2)
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+# en este árbol conviven crates que activan rustls sin proveedor por defecto:
+# hay que instalar uno explícito al arrancar (ver main.rs) o el TLS panica
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+futures-util = "0.3"
+qrcode = { version = "0.14", default-features = false }
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+base64ct = { version = "1", features = ["alloc"] }
+bs58 = "0.5"
+rand = "0.8"
+# generación local de la agent key (paso 6 de Fase 2); ya venía compilado
+# como transitiva del SDK — misma curva secp256k1 que usa Ethereum
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
