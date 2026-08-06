@@ -159,6 +159,29 @@ pub struct FillInfo {
     pub time_ms: u64,
 }
 
+/// Una transferencia NO de trading entre la cuenta observada y OTRA dirección
+/// (`userNonFundingLedgerUpdates`), para las listas de wallets relacionadas de
+/// la Vista 9. Solo se conservan los movimientos que tienen contraparte
+/// identificable: los depósitos/retiros del bridge, las liquidaciones y los
+/// traspasos spot⇄perps no la tienen y se descartan (ver `parse_transfer`).
+#[derive(Debug, Clone)]
+pub struct TransferInfo {
+    /// La OTRA dirección (nunca la observada), en el formato de la API.
+    pub counterparty: String,
+    /// true = la observada RECIBIÓ fondos de `counterparty`.
+    pub incoming: bool,
+    /// Tipo crudo del delta ("internalTransfer", "spotTransfer", "send",
+    /// "subAccountTransfer", "vaultDeposit"…) — se muestra, no se reinterpreta.
+    pub kind: String,
+    /// Token movido ("USDC" para los traspasos de perps).
+    pub token: String,
+    /// Cantidad en unidades del token.
+    pub amount: f64,
+    /// Valor en USD si la API lo reporta (`usdcValue`); para USDC = amount.
+    pub usd: Option<f64>,
+    pub time_ms: u64,
+}
+
 /// Cuenta grande trackeada desde el leaderboard.
 #[derive(Debug, Clone)]
 pub struct WhaleInfo {
@@ -286,6 +309,12 @@ pub enum DataMsg {
     WalletState(AccountSnapshot),
     /// Historial de fills (`userFills`) de una dirección observada (Vista 9).
     WalletFills { addr: String, fills: Vec<FillInfo> },
+    /// Transferencias con contraparte (`userNonFundingLedgerUpdates`) de una
+    /// dirección observada — wallets relacionadas de la Vista 9.
+    WalletTransfers {
+        addr: String,
+        transfers: Vec<TransferInfo>,
+    },
     /// Saldo SPOT dentro de Hyperliquid de la cuenta maestra WC (Vista 8).
     SpotState(SpotSnapshot),
     /// Modo de cuenta (`userAbstraction`) de la maestra WC — decide si el

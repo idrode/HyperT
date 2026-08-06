@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::data::types::{
     AccountMode, AccountSnapshot, CandlePoint, CtxSnapshot, DataMsg, ExtraReq, FillInfo, Interval,
-    LiveOrd, PairMeta, SpotSnapshot, WhaleInfo,
+    LiveOrd, PairMeta, SpotSnapshot, TransferInfo, WhaleInfo,
 };
 use crate::exec::{self, Confirm, ExecState, Focus, Hit, SlTpEdit};
 use crate::trader::{ExecEvent, TraderCmd};
@@ -610,6 +610,44 @@ pub enum View {
     Flow,
 }
 
+/// ¿Cae (col,row) dentro del Rect, si existe?
+fn hit(area: Option<Rect>, col: u16, row: u16) -> bool {
+    area.is_some_and(|a| {
+        col >= a.x && col < a.x + a.width && row >= a.y && row < a.y + a.height
+    })
+}
+
+/// Copia `text` al portapapeles del sistema vía OSC 52 (soportado por
+/// Kitty/Ghostty/WezTerm; sin dependencia extra) y devuelve el mensaje de
+/// feedback ya traducido.
+fn copy_osc52(text: &str) -> String {
+    use base64ct::{Base64, Encoding};
+    use std::io::Write;
+    let b64 = Base64::encode_string(text.as_bytes());
+    let seq = format!("\x1b]52;c;{b64}\x07");
+    let ok = std::io::stdout()
+        .write_all(seq.as_bytes())
+        .and_then(|_| std::io::stdout().flush())
+        .is_ok();
+    if ok {
+        crate::i18n::t().wh_copied_ok.into()
+    } else {
+        crate::i18n::t().wh_copied_fail.into()
+    }
+}
+
+/// Panel con el foco de teclado dentro de la Vista 9 (Tab cicla). Decide a
+/// qué lista afectan flechas y Enter: las posiciones abiertas o cada una de
+/// las dos listas de wallets relacionadas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletFocus {
+    Positions,
+    /// Fondos recibidos de.
+    In,
+    /// Fondos enviados a.
+    Out,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortCol {
     Coin,
@@ -776,6 +814,21 @@ pub struct App {
     /// operaciones cerradas.
     pub wallet_fills: Vec<FillInfo>,
     pub wallet_fills_at: Option<Instant>,
+    /// Transferencias con contraparte (`userNonFundingLedgerUpdates`) de la
+    /// dirección observada, más reciente primero: wallets relacionadas.
+    pub wallet_transfers: Vec<TransferInfo>,
+    pub wallet_transfers_at: Option<Instant>,
+    /// Panel con el foco de teclado en la Vista 9 (Tab cicla).
+    pub wallet_focus: WalletFocus,
+    /// Fila seleccionada en cada una de las dos listas de wallets relacionadas.
+    pub wallet_in_sel: usize,
+    pub wallet_out_sel: usize,
+    /// Modal de dirección completa de una wallet relacionada: (dirección,
+    /// feedback de copia). Reusa el mismo overlay que el modal de whale.
+    pub wallet_addr_modal: Option<(String, Option<String>)>,
+    /// Pila de direcciones observadas previamente, para volver atrás tras
+    /// pivotar a una wallet relacionada.
+    pub wallet_back: Vec<String>,
     /// Fila seleccionada en la tabla de posiciones abiertas (Vista 9).
     pub wallet_sel: usize,
     pub wallet_state: TableState,
@@ -784,6 +837,13 @@ pub struct App {
     pub wallet_pos_modal: Option<String>,
     /// Rect de la zona de datos de la tabla de posiciones (mapear clicks).
     pub wallet_rows_area: Option<Rect>,
+    /// Rects de las filas de las dos listas de wallets relacionadas (clicks).
+    pub wallet_in_area: Option<Rect>,
+    pub wallet_out_area: Option<Rect>,
+    /// Primera fila visible de cada lista (scroll), fijado al dibujar: los
+    /// clicks se mapean con el mismo desplazamiento que se pintó.
+    pub wallet_in_top: usize,
+    pub wallet_out_top: usize,
     pub input_mode: bool,
     pub input_buf: String,
     pub input_err: Option<String>,
@@ -923,10 +983,21 @@ impl App {
             wallet_target: None,
             wallet_fills: Vec::new(),
             wallet_fills_at: None,
+            wallet_transfers: Vec::new(),
+            wallet_transfers_at: None,
+            wallet_focus: WalletFocus::Positions,
+            wallet_in_sel: 0,
+            wallet_out_sel: 0,
+            wallet_addr_modal: None,
+            wallet_back: Vec::new(),
             wallet_sel: 0,
             wallet_state: TableState::default(),
             wallet_pos_modal: None,
             wallet_rows_area: None,
+            wallet_in_area: None,
+            wallet_out_area: None,
+            wallet_in_top: 0,
+            wallet_out_top: 0,
             input_mode: false,
             input_buf: String::new(),
             input_err: None,
@@ -1159,6 +1230,14 @@ impl App {
                     self.wallet_fills_at = Some(Instant::now());
                 }
             }
+            DataMsg::WalletTransfers { addr, transfers } => {
+                // mismo criterio que los fills: solo la watch-only actual
+                if self.wallet_addr.as_deref() == Some(addr.as_str()) {
+                    self.wallet_transfers = transfers;
+                    self.wallet_transfers_at = Some(Instant::now());
+                    self.clamp_wallet_transfer_sel();
+                }
+            }
             DataMsg::Wc(s) => {
                 self.wc = s;
                 self.sync_funds_target();
@@ -1251,6 +1330,130 @@ impl App {
         }
     }
 
+    /// Transferencias recibidas / enviadas de la dirección observada, más
+    /// reciente primero (el orden en el que llegan del ledger).
+    pub fn wallet_in(&self) -> Vec<&TransferInfo> {
+        self.wallet_transfers.iter().filter(|t| t.incoming).collect()
+    }
+
+    pub fn wallet_out(&self) -> Vec<&TransferInfo> {
+        self.wallet_transfers.iter().filter(|t| !t.incoming).collect()
+    }
+
+    fn clamp_wallet_transfer_sel(&mut self) {
+        let (i, o) = (self.wallet_in().len(), self.wallet_out().len());
+        self.wallet_in_sel = self.wallet_in_sel.min(i.saturating_sub(1));
+        self.wallet_out_sel = self.wallet_out_sel.min(o.saturating_sub(1));
+    }
+
+    /// Mueve la selección del panel con el foco (posiciones o una de las dos
+    /// listas de wallets relacionadas).
+    fn move_wallet_focus_sel(&mut self, delta: i64) {
+        let (sel, n) = match self.wallet_focus {
+            WalletFocus::Positions => return self.move_wallet_sel(delta),
+            WalletFocus::In => (&mut self.wallet_in_sel, self.wallet_transfers.iter().filter(|t| t.incoming).count()),
+            WalletFocus::Out => (&mut self.wallet_out_sel, self.wallet_transfers.iter().filter(|t| !t.incoming).count()),
+        };
+        if n == 0 {
+            *sel = 0;
+            return;
+        }
+        *sel = (*sel as i64 + delta).clamp(0, n as i64 - 1) as usize;
+    }
+
+    /// Tab cicla el foco entre los tres paneles navegables de la Vista 9.
+    fn cycle_wallet_focus(&mut self) {
+        self.wallet_focus = match self.wallet_focus {
+            WalletFocus::Positions => WalletFocus::In,
+            WalletFocus::In => WalletFocus::Out,
+            WalletFocus::Out => WalletFocus::Positions,
+        };
+    }
+
+    /// Dirección de la fila seleccionada en la lista de wallets relacionadas
+    /// que tenga el foco; None si el foco está en posiciones o la lista vacía.
+    fn wallet_focused_addr(&self) -> Option<String> {
+        let list = match self.wallet_focus {
+            WalletFocus::Positions => return None,
+            WalletFocus::In => self.wallet_in(),
+            WalletFocus::Out => self.wallet_out(),
+        };
+        let sel = match self.wallet_focus {
+            WalletFocus::In => self.wallet_in_sel,
+            _ => self.wallet_out_sel,
+        };
+        list.get(sel).map(|t| t.counterparty.clone())
+    }
+
+    /// Abre el modal de dirección completa de la wallet relacionada
+    /// seleccionada (mismo overlay que el de whale), desde donde se pivota.
+    fn open_wallet_addr_modal(&mut self) {
+        if let Some(a) = self.wallet_focused_addr() {
+            self.wallet_addr_modal = Some((a, None));
+        }
+    }
+
+    /// Pasa a observar `addr` (Vista 9), reseteando todo lo derivado de la
+    /// dirección anterior. Si `remember`, apila la actual para poder volver.
+    fn observe_wallet(&mut self, addr: Address, remember: bool) {
+        let fmt = format!("{addr}");
+        if self.wallet_addr.as_deref() == Some(fmt.as_str()) {
+            return;
+        }
+        if remember {
+            if let Some(prev) = self.wallet_addr.clone() {
+                self.wallet_back.push(prev);
+            }
+        }
+        self.wallet_addr = Some(fmt);
+        self.wallet = None;
+        self.wallet_at = None;
+        self.wallet_fills = Vec::new();
+        self.wallet_fills_at = None;
+        self.wallet_transfers = Vec::new();
+        self.wallet_transfers_at = None;
+        self.wallet_sel = 0;
+        self.wallet_in_sel = 0;
+        self.wallet_out_sel = 0;
+        self.wallet_focus = WalletFocus::Positions;
+        self.wallet_pos_modal = None;
+        self.wallet_addr_modal = None;
+        self.wallet_target = Some(addr);
+        self.push_wallet_targets();
+    }
+
+    /// Pivota a la dirección del modal de wallet relacionada, apilando la
+    /// actual en la pila de navegación (Backspace vuelve).
+    fn pivot_to_modal_addr(&mut self) {
+        let Some((a, _)) = self.wallet_addr_modal.clone() else {
+            return;
+        };
+        match a.parse::<Address>() {
+            Ok(addr) => self.observe_wallet(addr, true),
+            // el ledger trae direcciones de la propia API: si una no parsea,
+            // mejor cerrar el modal que dejarlo colgado sin explicación.
+            Err(_) => self.wallet_addr_modal = None,
+        }
+    }
+
+    /// Vuelve a la dirección anterior de la pila de navegación (Backspace).
+    fn wallet_go_back(&mut self) {
+        let Some(prev) = self.wallet_back.pop() else {
+            return;
+        };
+        if let Ok(addr) = prev.parse::<Address>() {
+            self.observe_wallet(addr, false);
+        }
+    }
+
+    /// Copia al portapapeles (OSC 52) la dirección del modal de wallet
+    /// relacionada — mismo mecanismo que el modal de whale.
+    fn copy_wallet_modal_addr(&mut self) {
+        if let Some((addr, feedback)) = self.wallet_addr_modal.as_mut() {
+            *feedback = Some(copy_osc52(addr));
+        }
+    }
+
     /// Abre el modal con la dirección completa de la whale seleccionada.
     fn open_whale_modal(&mut self) {
         if let Some(addr) = self.whale_addr_at(self.whale_sel) {
@@ -1262,19 +1465,7 @@ impl App {
     /// (soportado por Kitty/Ghostty/WezTerm; sin dependencia extra).
     fn copy_whale_addr(&mut self) {
         if let Some((addr, feedback)) = self.whale_modal.as_mut() {
-            use base64ct::{Base64, Encoding};
-            use std::io::Write;
-            let b64 = Base64::encode_string(addr.as_bytes());
-            let seq = format!("\x1b]52;c;{b64}\x07");
-            let ok = std::io::stdout()
-                .write_all(seq.as_bytes())
-                .and_then(|_| std::io::stdout().flush())
-                .is_ok();
-            *feedback = Some(if ok {
-                crate::i18n::t().wh_copied_ok.into()
-            } else {
-                crate::i18n::t().wh_copied_fail.into()
-            });
+            *feedback = Some(copy_osc52(addr));
         }
     }
 
@@ -1893,15 +2084,10 @@ impl App {
                 let s = self.input_buf.trim();
                 match s.parse::<Address>() {
                     Ok(a) => {
-                        self.wallet_addr = Some(format!("{a}"));
-                        self.wallet = None;
-                        self.wallet_at = None;
-                        self.wallet_fills = Vec::new();
-                        self.wallet_fills_at = None;
-                        self.wallet_sel = 0;
-                        self.wallet_pos_modal = None;
-                        self.wallet_target = Some(a);
-                        self.push_wallet_targets();
+                        // dirección tecleada = nueva raíz: la pila de "volver
+                        // atrás" del pivoteo entre wallets deja de aplicar.
+                        self.wallet_back.clear();
+                        self.observe_wallet(a, false);
                         self.input_mode = false;
                         self.input_err = None;
                     }
@@ -2473,17 +2659,33 @@ impl App {
                 self.mouse_pos = Some((me.column, me.row));
                 if self.wallet_pos_modal.is_some() {
                     self.wallet_pos_modal = None;
-                } else if let Some(a) = self.wallet_rows_area {
-                    if me.column >= a.x
-                        && me.column < a.x + a.width
-                        && me.row >= a.y
-                        && me.row < a.y + a.height
-                    {
-                        let idx = self.wallet_state.offset() + (me.row - a.y) as usize;
-                        if idx < self.wallet_pos_len() {
-                            self.wallet_sel = idx;
-                            self.open_wallet_pos_modal();
-                        }
+                } else if self.wallet_addr_modal.is_some() {
+                    // el pivoteo exige Enter a propósito: un click solo cierra,
+                    // nunca cambia la wallet observada por accidente.
+                    self.wallet_addr_modal = None;
+                } else if hit(self.wallet_rows_area, me.column, me.row) {
+                    let a = self.wallet_rows_area.unwrap();
+                    let idx = self.wallet_state.offset() + (me.row - a.y) as usize;
+                    if idx < self.wallet_pos_len() {
+                        self.wallet_focus = WalletFocus::Positions;
+                        self.wallet_sel = idx;
+                        self.open_wallet_pos_modal();
+                    }
+                } else if hit(self.wallet_in_area, me.column, me.row) {
+                    let a = self.wallet_in_area.unwrap();
+                    let idx = self.wallet_in_top + (me.row - a.y) as usize;
+                    if idx < self.wallet_in().len() {
+                        self.wallet_focus = WalletFocus::In;
+                        self.wallet_in_sel = idx;
+                        self.open_wallet_addr_modal();
+                    }
+                } else if hit(self.wallet_out_area, me.column, me.row) {
+                    let a = self.wallet_out_area.unwrap();
+                    let idx = self.wallet_out_top + (me.row - a.y) as usize;
+                    if idx < self.wallet_out().len() {
+                        self.wallet_focus = WalletFocus::Out;
+                        self.wallet_out_sel = idx;
+                        self.open_wallet_addr_modal();
                     }
                 }
             }
@@ -3202,7 +3404,10 @@ impl App {
                 self.view = View::Wallet;
                 return;
             }
-            KeyCode::Tab => {
+            // Tab cicla de vista salvo en la Vista 9 con dirección observada:
+            // ahí cicla el foco entre sus paneles navegables (posiciones y las
+            // dos listas de wallets relacionadas), como en cualquier tabla.
+            KeyCode::Tab if self.view != View::Wallet || self.wallet_addr.is_none() => {
                 self.cycle_view();
                 return;
             }
@@ -3271,13 +3476,28 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.wallet_pos_modal = None,
                 _ => {}
             },
+            // modal de una wallet relacionada: Enter PIVOTA la observación a
+            // esa dirección (Esc/q cierran sin cambiar nada, c copia).
+            View::Wallet if self.wallet_addr_modal.is_some() => match key.code {
+                KeyCode::Char('c') => self.copy_wallet_modal_addr(),
+                KeyCode::Enter => self.pivot_to_modal_addr(),
+                KeyCode::Esc | KeyCode::Char('q') => self.wallet_addr_modal = None,
+                _ => {}
+            },
             View::Wallet => match key.code {
                 KeyCode::Char('e') | KeyCode::Char('a') => self.start_input(),
                 // sin dirección observada aún, Enter equivale a introducir una
                 KeyCode::Enter if self.wallet_addr.is_none() => self.start_input(),
-                KeyCode::Down | KeyCode::Char('j') => self.move_wallet_sel(1),
-                KeyCode::Up | KeyCode::Char('k') => self.move_wallet_sel(-1),
-                KeyCode::Enter => self.open_wallet_pos_modal(),
+                KeyCode::Tab | KeyCode::BackTab => self.cycle_wallet_focus(),
+                KeyCode::Down | KeyCode::Char('j') => self.move_wallet_focus_sel(1),
+                KeyCode::Up | KeyCode::Char('k') => self.move_wallet_focus_sel(-1),
+                KeyCode::PageDown => self.move_wallet_focus_sel(10),
+                KeyCode::PageUp => self.move_wallet_focus_sel(-10),
+                KeyCode::Enter if self.wallet_focus == WalletFocus::Positions => {
+                    self.open_wallet_pos_modal()
+                }
+                KeyCode::Enter => self.open_wallet_addr_modal(),
+                KeyCode::Backspace => self.wallet_go_back(),
                 KeyCode::Esc => self.view = View::Ranking,
                 _ => {}
             },
@@ -3978,6 +4198,109 @@ mod tests {
             matches!(app.transfer_ui, Some(TransferUi::Amount { .. })),
             "en cuenta estándar t debe abrir el modal"
         );
+    }
+
+    // ── wallets relacionadas (Vista 9) ─────────────────────────────────────
+
+    fn transfer(counterparty: &str, incoming: bool, amount: f64, t: u64) -> TransferInfo {
+        TransferInfo {
+            counterparty: counterparty.into(),
+            incoming,
+            kind: "internalTransfer".into(),
+            token: "USDC".into(),
+            amount,
+            usd: Some(amount),
+            time_ms: t,
+        }
+    }
+
+    const WATCHED: &str = "0x1111111111111111111111111111111111111111";
+    const FRIEND: &str = "0x2222222222222222222222222222222222222222";
+
+    /// Las transferencias se reparten en las dos listas por sentido, y solo
+    /// las de la dirección observada actualmente entran (igual que los fills).
+    #[test]
+    fn wallets_relacionadas_se_reparten_por_sentido() {
+        let (mut app, _w, _u, _wc) = test_app();
+        app.view = View::Wallet;
+        set_watch(&mut app, WATCHED);
+        let addr = app.wallet_addr.clone().unwrap();
+
+        app.apply_msg(DataMsg::WalletTransfers {
+            addr: "0xotra".into(),
+            transfers: vec![transfer(FRIEND, true, 5.0, 10)],
+        });
+        assert!(app.wallet_transfers.is_empty(), "otra dirección no entra");
+
+        app.apply_msg(DataMsg::WalletTransfers {
+            addr,
+            transfers: vec![
+                transfer(FRIEND, true, 5.0, 20),
+                transfer(FRIEND, false, 3.0, 10),
+            ],
+        });
+        assert_eq!(app.wallet_in().len(), 1);
+        assert_eq!(app.wallet_out().len(), 1);
+        assert_eq!(app.wallet_in()[0].amount, 5.0);
+    }
+
+    /// Flujo completo de pivoteo: Tab lleva el foco a la lista de recibidos,
+    /// Enter abre el modal de dirección, Enter ahí PIVOTA la observación (con
+    /// todo lo derivado limpio) y Backspace vuelve a la wallet anterior.
+    #[test]
+    fn pivotar_a_wallet_relacionada_y_volver() {
+        let (mut app, wallet_rx, _u, _wc) = test_app();
+        app.view = View::Wallet;
+        set_watch(&mut app, WATCHED);
+        let addr = app.wallet_addr.clone().unwrap();
+        app.apply_msg(DataMsg::WalletTransfers {
+            addr: addr.clone(),
+            transfers: vec![transfer(FRIEND, true, 5.0, 20)],
+        });
+        app.apply_msg(DataMsg::WalletFills {
+            addr: addr.clone(),
+            fills: Vec::new(),
+        });
+
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.wallet_focus, WalletFocus::In);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.wallet_addr_modal.is_some(), "Enter abre la dirección");
+        assert!(
+            app.wallet_addr.as_deref() == Some(addr.as_str()),
+            "abrir el modal NO cambia todavía la wallet observada"
+        );
+
+        press(&mut app, KeyCode::Enter);
+        let friend_fmt = format!("{}", FRIEND.parse::<Address>().unwrap());
+        assert_eq!(app.wallet_addr.as_deref(), Some(friend_fmt.as_str()));
+        assert!(app.wallet_addr_modal.is_none());
+        assert!(app.wallet_transfers.is_empty(), "datos de la anterior fuera");
+        assert!(app.wallet_transfers_at.is_none());
+        assert!(app.wallet_fills_at.is_none());
+        assert_eq!(app.wallet_focus, WalletFocus::Positions);
+        // el watcher pasa a observar la nueva dirección
+        assert_eq!(wallet_rx.borrow().len(), 1);
+        assert_eq!(format!("{}", wallet_rx.borrow()[0]), friend_fmt);
+
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.wallet_addr.as_deref(), Some(addr.as_str()));
+        assert!(app.wallet_back.is_empty());
+        // sin más historia, Backspace no hace nada raro
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.wallet_addr.as_deref(), Some(addr.as_str()));
+    }
+
+    /// Teclear una dirección nueva a mano es una raíz nueva: la pila de
+    /// pivoteo anterior no debe llevar de vuelta a wallets de otra rama.
+    #[test]
+    fn direccion_tecleada_reinicia_la_pila() {
+        let (mut app, _w, _u, _wc) = test_app();
+        app.view = View::Wallet;
+        set_watch(&mut app, WATCHED);
+        app.wallet_back.push(WATCHED.into());
+        set_watch(&mut app, FRIEND);
+        assert!(app.wallet_back.is_empty());
     }
 
     /// El modo de otra dirección no pisa el de la maestra conectada (mismo

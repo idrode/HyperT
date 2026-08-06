@@ -5,6 +5,17 @@ Interfaz de trading en terminal (TUI) para Hyperliquid DEX, escrita en Rust.
 Pensada para swing/position trading (holds de días), NO para scalping automático de alta frecuencia.
 
 ## Estado actual del proyecto: arrancando FASE 2 — fondos reales y ejecución
+
+### 🚨 DOS HALLAZGOS CRÍTICOS (verificados contra código el 2026-08-05, resolver YA)
+1. **El repositorio NO tiene ni un solo commit.** Todo el proyecto (~19.600 líneas, incluido código
+   que mueve fondos reales) existe solo como working tree — un accidente de disco lo borra entero.
+   Verificar `.gitignore` cubre `/secrets/` (`git check-ignore -v secrets/agent_mainnet.json`) y
+   hacer el primer commit YA, antes de cualquier otra tarea. Prioridad absoluta.
+2. **`secrets/agent_testnet.json` NO EXISTE** — solo está `agent_mainnet.json`. Esto bloquea el
+   paso 8 (E2E en testnet) e invierte la red de seguridad: hoy la ÚNICA red donde el panel de
+   ejecución puede armarse es MAINNET, con fondos reales. Autorizar la agent wallet de testnet
+   (tecla `a` con `--testnet` y el móvil) es la siguiente acción real más urgente tras el commit.
+
 Fase 1 funcionalmente completa (ranking, vista de par, heatmap, whale positioning, wallet watch-only,
 heatmap de liquidaciones estimado, panel Ballenas+RSI/ADX/DMI). Bug de latencia de precio resuelto
 (ver nota histórica más abajo si reaparece). A partir de aquí, TODO lo que sigue toca fondos reales
@@ -518,7 +529,9 @@ Todas las vistas 1-7 construidas y validadas en vivo contra mainnet. Ver "Lo ya 
 - **i18n (interfaz en inglés por defecto + toggle ES/EN)** — EN CURSO. Infraestructura + chrome
   universal (header, footer, ayuda, buscador) migrados y verificados en runtime. Las 7 vistas de
   lectura (ranking, heatmap, whales, liq, flow, wallet, pair) también migradas y verificadas.
-  PENDIENTE: fondos.rs (~246 literales) y exec.rs (~108), con sus enum-labels de órdenes — dejar
+  PENDIENTE (recuento real verificado 2026-08-05, menor de lo estimado originalmente):
+  fondos.rs ~92 literales, exec.rs/ui/exec.rs ~21 — i18n::t() ya usado 16/17/6 veces
+  respectivamente, así que está parcialmente migrado, no desde cero. Dejar
   para sesión aparte por ser los paneles que tocan dinero real, con atención extra a que ningún
   texto de confirmación/cantidad/dirección quede ambiguo al traducir.
 
@@ -570,8 +583,44 @@ si el Delta por vela demuestra ser útil en uso real primero.
 ✅ HECHO — modal con Enter/click, dirección completa sin truncar, copia al portapapeles vía OSC 52
 (Kitty/Ghostty/WezTerm) usando `base64ct` ya presente en el árbol, sin dependencia nueva.
 
-## Ampliación Vista 9 (Wallet watch-only, numeración ACTUAL): historial de fills, win rate, PnL
-⚠️ PENDIENTE. Nota de numeración: Wallet watch-only es la **Vista 9** con la numeración actual.
+## Nueva feature: wallets relacionadas / rastreo de fondos (Vista 9, Wallet watch-only)
+Objetivo del usuario: al observar una wallet, poder ver desde qué otras direcciones recibió fondos
+y a cuáles envió, para hacer seguimiento de "smart money" moviéndose entre cuentas.
+
+**Alcance decidido — solo transferencias DENTRO de Hyperliquid, no rastreo on-chain:**
+Rastrear el origen de fondos antes de llegar a Hyperliquid (quién fondeó la wallet en Arbitrum,
+etc.) requeriría un explorador de bloques externo (Arbiscan API u otro) y crecería
+exponencialmente con cada salto hacia atrás — eso ya no son "datos nativos de Hyperliquid" y es un
+proyecto de rastreo on-chain aparte, fuera de alcance por ahora. Lo que SÍ es factible y coherente
+con la prioridad "datos nativos > TA/externo" del proyecto: usar el endpoint de historial de
+movimientos no relacionados con trading de Hyperliquid (`userNonFundingLedgerUpdates` o el nombre
+exacto que tenga en el SDK/API — verificar antes de asumir) para listar depósitos, retiros, y
+**transferencias internas entre direcciones de Hyperliquid** (la acción `usdSend`/`spotSend`) de la
+wallet en observación. Esto da un salto directo: quién le envió fondos a esta wallet, y a quién
+esta wallet le envió fondos — con cantidad y fecha exactos.
+
+**Diseño de UI — lista navegable con pivote, NO un árbol gráfico estático:**
+Un árbol visual completo no cabe bien en un TUI más allá de 1-2 niveles y crece sin control si la
+wallet observada es una whale con muchas contrapartes. En su lugar:
+- Dos listas nuevas en Vista 9 (sección aparte, bajo lo ya construido): "Fondos recibidos de" y
+  "Fondos enviados a", cada fila con dirección (truncada, reusar el patrón de modal de dirección
+  completa ya construido en Vista 7 para poder ver/copiar la dirección entera), importe y fecha.
+- Al pulsar `Enter` sobre una dirección de esas listas, esa dirección se convierte en la NUEVA
+  wallet observada (mismo mecanismo que ya existe para introducir una dirección manualmente con
+  `e`, pero disparado desde aquí en vez de tecleando) — permite "caminar" el grafo de fondos salto
+  a salto, como navegar enlaces en un explorador de bloques.
+- Mantener una pila de navegación (historial de wallets visitadas) con una tecla para "volver atrás"
+  (ej. `Backspace` o similar, revisar bindings existentes para evitar colisión) — para no perder el
+  hilo al explorar varios saltos.
+- Límite de resultados por lista (ej. los N movimientos más recientes o más grandes) si el endpoint
+  no pagina bien o si una whale tiene demasiados movimientos — no intentar cargar un historial
+  ilimitado de golpe.
+- Solo lectura, no toca fondos ni firma — se puede lanzar sin supervisión activa.
+
+
+✅ HECHO — verificado contra código el 2026-08-05 (src/ui/wallet.rs), con 5 tests en verde
+(resumen_win_rate_y_pnl, apertura_detecta_flip_de_lado, apertura_es_cota_inferior_si_no_hay_cruce_por_cero,
+entre otros). Nota de numeración: Wallet watch-only es la **Vista 9** con la numeración actual.
 
 Requiere una llamada nueva: `userFills` (historial de operaciones/fills de la dirección en
 observación) — no confundir con `clearinghouseState` (que solo da el estado actual, sin histórico).
@@ -608,6 +657,28 @@ observación) — no confundir con `clearinghouseState` (que solo da el estado a
 - Es solo lectura, no toca fondos ni firma — se puede lanzar sin supervisión activa.
 - Reusar el patrón visual de modal ya establecido (overlay centrado con `Clear`, cerrable con
   `Esc`/`Enter`/click) para el modal de fecha+funding de la posición abierta.
+
+## ✅ HECHO: wallets relacionadas en Vista 9 (fondos recibidos de / enviados a)
+Endpoint VERIFICADO con curl contra mainnet antes de construir: `userNonFundingLedgerUpdates`
+(POST /info, `startTime` OBLIGATORIO, respuesta más ANTIGUA primero — se invierte). El SDK pineado
+no lo expone → POST crudo con el `info_post` ya existente. Se pide en el mismo watcher y a la misma
+cadencia que `userFills` (60s).
+- Solo se muestran los movimientos CON contraparte: `internalTransfer`/`subAccountTransfer` y
+  `spotTransfer`/`send` (par `user`→`destination`), y `vaultDeposit`/`vaultWithdraw`/
+  `vaultDistribution` (contraparte = `vault`, sentido según el tipo). Los `deposit`/`withdraw` del
+  bridge, `liquidation`, `accountClassTransfer` y `spotGenesis` NO relacionan la cuenta con otra
+  wallet y se descartan a propósito — no es que falten.
+- Un `send` de la cuenta a sí misma (mover entre dexes) también se descarta.
+- UI: dos tablas lado a lado bajo las posiciones (fecha · wallet abreviada · cantidad · tipo).
+  `Tab` cicla el foco entre posiciones → recibidos → enviados (en Vista 9 con dirección observada,
+  `Tab` YA NO cambia de vista; sin dirección observada sigue ciclando vistas como siempre).
+- `Enter` sobre una fila abre el modal de dirección completa YA EXISTENTE (el de whales, ahora
+  compartido como `ui::whales::draw_addr_overlay`); ahí `Enter` PIVOTA la wallet observada a esa
+  dirección, `c` copia por OSC 52, `Esc`/click cierran. El click nunca pivota: solo abre/cierra.
+- `Backspace` vuelve a la wallet anterior (pila `wallet_back`, profundidad visible en la cabecera).
+  Teclear una dirección a mano con `e` reinicia la pila (es una raíz nueva).
+- Solo lectura; no toca `src/wallet/` ni `trader.rs`. Validado en vivo con el driver pty contra una
+  cuenta real de mainnet (pivoteo y vuelta atrás incluidos) + tests unitarios de parseo y navegación.
 
 ## ✅ RESUELTO: input de wallet (Vista 9) siempre vacío + pegado de portapapeles
 El input de añadir wallet (tecla `e`) ya no pre-rellena con la última dirección (`input_buf =

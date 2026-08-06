@@ -13,7 +13,7 @@ use tokio::time::sleep;
 
 use types::{
     AccountMode, AccountSnapshot, CandlePoint, CtxSnapshot, DataMsg, ExtraReq, FillInfo, PairMeta,
-    PosInfo, SpotSnapshot, WhaleInfo,
+    PosInfo, SpotSnapshot, TransferInfo, WhaleInfo,
 };
 
 const CTX_POLL_SECS: u64 = 5;
@@ -890,6 +890,103 @@ async fn fetch_account_mode(
         .ok_or_else(|| format!("respuesta inesperada: {v}"))
 }
 
+/// Reduce una entrada de `userNonFundingLedgerUpdates` a una transferencia con
+/// contraparte, vista DESDE `me`. None = la entrada no relaciona a `me` con
+/// otra wallet y no pinta nada en las listas de wallets relacionadas.
+///
+/// Formas verificadas contra la API real de mainnet el 2026-08-06 (una entrada
+/// es `{time, hash, delta:{type, …}}`):
+/// - `internalTransfer` / `subAccountTransfer`: `user`→`destination`, `usdc`.
+/// - `spotTransfer` / `send`: `user`→`destination`, `token`, `amount`,
+///   `usdcValue`. Un `send` de la cuenta a sí misma (mover entre dexes) se
+///   descarta: no hay wallet relacionada.
+/// - `vaultDeposit`/`vaultWithdraw`/`vaultDistribution`: la contraparte es el
+///   `vault`, y el sentido lo marca el propio tipo.
+/// - `deposit`/`withdraw` (bridge), `liquidation`, `accountClassTransfer`,
+///   `spotGenesis`, `rewardsClaim`…: sin contraparte on-Hyperliquid → None.
+fn parse_transfer(e: &serde_json::Value, me: &str) -> Option<TransferInfo> {
+    let time_ms = e["time"].as_u64()?;
+    let d = &e["delta"];
+    let kind = d["type"].as_str()?.to_string();
+    let num = |v: &serde_json::Value| v.as_str().and_then(|s| s.parse::<f64>().ok());
+    let eq = |a: &str| a.eq_ignore_ascii_case(me);
+
+    let (counterparty, incoming, token, amount, usd) = match kind.as_str() {
+        "internalTransfer" | "subAccountTransfer" => {
+            let from = d["user"].as_str()?;
+            let to = d["destination"].as_str()?;
+            let usdc = num(&d["usdc"])?;
+            let incoming = eq(to);
+            let other = if incoming { from } else { to };
+            (other.to_string(), incoming, "USDC".to_string(), usdc, Some(usdc))
+        }
+        "spotTransfer" | "send" => {
+            let from = d["user"].as_str()?;
+            let to = d["destination"].as_str()?;
+            if eq(from) == eq(to) {
+                return None; // traspaso a uno mismo (o entrada ajena)
+            }
+            let incoming = eq(to);
+            let other = if incoming { from } else { to };
+            (
+                other.to_string(),
+                incoming,
+                d["token"].as_str().unwrap_or("?").to_string(),
+                num(&d["amount"])?,
+                num(&d["usdcValue"]),
+            )
+        }
+        "vaultDeposit" | "vaultWithdraw" | "vaultDistribution" => {
+            let vault = d["vault"].as_str()?;
+            let usdc = num(&d["usdc"])?;
+            let incoming = kind != "vaultDeposit";
+            (vault.to_string(), incoming, "USDC".to_string(), usdc, Some(usdc))
+        }
+        _ => return None,
+    };
+    // Una entrada que no involucra a la cuenta observada no debe colarse.
+    if eq(&counterparty) {
+        return None;
+    }
+    Some(TransferInfo {
+        counterparty,
+        incoming,
+        kind,
+        token,
+        amount,
+        usd,
+        time_ms,
+    })
+}
+
+/// Transferencias con contraparte de `user` vía `userNonFundingLedgerUpdates`
+/// (/info, solo lectura; el SDK pineado no lo expone → POST crudo). `startTime`
+/// es obligatorio en la petición; se pide el historial completo (0). La
+/// respuesta viene más ANTIGUA primero: se invierte para dejar lo reciente
+/// arriba, igual que `userFills`.
+async fn fetch_transfers(
+    client: &reqwest::Client,
+    api: &str,
+    user: &str,
+) -> Result<Vec<TransferInfo>, String> {
+    let v = info_post(
+        client,
+        api,
+        serde_json::json!({
+            "type": "userNonFundingLedgerUpdates",
+            "user": user,
+            "startTime": 0,
+        }),
+    )
+    .await?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("respuesta inesperada: {v}"))?;
+    let mut out: Vec<TransferInfo> = arr.iter().filter_map(|e| parse_transfer(e, user)).collect();
+    out.reverse();
+    Ok(out)
+}
+
 /// Reduce una orden del array de `frontendOpenOrders` (forma verificada
 /// contra la API real el 2026-07-20: coin, side B/A, limitPx, sz, oid,
 /// orderType, isTrigger, triggerPx, reduceOnly, …). None = entrada ilegible
@@ -1016,6 +1113,8 @@ async fn wallet_watcher(
     mut rx: watch::Receiver<Vec<Address>>,
 ) {
     let info = new_client_retrying(base, &tx).await;
+    let http = reqwest::Client::new();
+    let api = info_api(base);
     // Última vez que se pidió userFills por dirección, para espaciarlo (60s)
     // respecto al clearinghouseState (10s) — el historial cambia despacio.
     let mut fills_at: std::collections::HashMap<Address, Instant> = std::collections::HashMap::new();
@@ -1051,6 +1150,20 @@ async fn wallet_watcher(
                         addr: format!("{addr}"),
                         fills,
                     });
+                }
+                // Wallets relacionadas: mismo ritmo que los fills (el ledger de
+                // transferencias cambia aún más despacio que las operaciones).
+                let user = format!("{addr}");
+                match fetch_transfers(&http, api, &user).await {
+                    Ok(transfers) => {
+                        let _ = tx.send(DataMsg::WalletTransfers {
+                            addr: user,
+                            transfers,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(DataMsg::RestError(format!("ledger: {e}")));
+                    }
                 }
                 fills_at.insert(addr, Instant::now());
             }
@@ -1100,6 +1213,81 @@ mod tests {
         assert_eq!(s.usdc_total, 0.0);
         assert!(s.usdc_avail.is_none());
         assert!(s.others.is_empty());
+    }
+
+    /// Reducción de `userNonFundingLedgerUpdates` con entradas COPIADAS de la
+    /// respuesta real de mainnet (2026-08-06): solo salen los movimientos con
+    /// contraparte, con el sentido visto desde la cuenta observada.
+    #[test]
+    fn transferencias_solo_con_contraparte() {
+        let me = "0xC272Fa7d73E8ed66E65A6281570d3788beA5E7A4";
+        let raw = serde_json::json!([
+            {"time": 1708226524752u64, "hash": "0x17", "delta": {"type": "deposit", "usdc": "5.0"}},
+            {"time": 1710245187638u64, "hash": "0x06", "delta": {"type": "internalTransfer",
+                "usdc": "1.0", "user": "0xc272fa7d73e8ed66e65a6281570d3788bea5e7a4",
+                "destination": "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7", "fee": "0.0"}},
+            {"time": 1713367479014u64, "hash": "0x8f", "delta": {"type": "accountClassTransfer",
+                "usdc": "0.954857", "toPerp": false}},
+            {"time": 1742149624653u64, "hash": "0x45", "delta": {"type": "spotTransfer",
+                "token": "FLY", "amount": "2000.0", "usdcValue": "3.408",
+                "user": "0x0168985218db3c45d8271ee48466ed93a5df873a",
+                "destination": "0xc272fa7d73e8ed66e65a6281570d3788bea5e7a4", "fee": "0.0"}},
+            {"time": 1764813982494u64, "hash": "0x4d", "delta": {"type": "send",
+                "user": "0xc272fa7d73e8ed66e65a6281570d3788bea5e7a4",
+                "destination": "0xc272fa7d73e8ed66e65a6281570d3788bea5e7a4",
+                "token": "USDC", "amount": "0.15", "usdcValue": "0.15"}},
+        ]);
+        let out: Vec<TransferInfo> = raw
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| parse_transfer(e, me))
+            .collect();
+
+        // depósito de bridge, accountClassTransfer y el send a uno mismo caen.
+        assert_eq!(out.len(), 2);
+        let sent = &out[0];
+        assert_eq!(sent.kind, "internalTransfer");
+        assert!(!sent.incoming);
+        assert_eq!(sent.counterparty, "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7");
+        assert_eq!(sent.amount, 1.0);
+
+        let recv = &out[1];
+        assert!(recv.incoming);
+        assert_eq!(recv.token, "FLY");
+        assert_eq!(recv.amount, 2000.0);
+        assert_eq!(recv.usd, Some(3.408));
+        assert_eq!(recv.counterparty, "0x0168985218db3c45d8271ee48466ed93a5df873a");
+    }
+
+    /// Un depósito a vault se cuenta como fondos ENVIADOS al vault, y una
+    /// retirada/reparto como recibidos — el sentido lo marca el tipo, no un
+    /// par user/destination (que estas entradas no traen).
+    #[test]
+    fn transferencias_de_vault_toman_el_sentido_del_tipo() {
+        let me = "0xC272Fa7d73E8ed66E65A6281570d3788beA5E7A4";
+        let ent = |t: &str| {
+            serde_json::json!({"time": 1, "hash": "0x1", "delta": {"type": t,
+                "vault": "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303", "usdc": "10.0"}})
+        };
+        assert!(!parse_transfer(&ent("vaultDeposit"), me).unwrap().incoming);
+        assert!(parse_transfer(&ent("vaultWithdraw"), me).unwrap().incoming);
+        assert!(parse_transfer(&ent("vaultDistribution"), me).unwrap().incoming);
+    }
+
+    /// Sonda real contra mainnet: el endpoint existe, responde una lista y sus
+    /// entradas se reducen sin panic. Ignorada por defecto (toca la red).
+    #[tokio::test]
+    #[ignore]
+    async fn ledger_real_mainnet() {
+        let user = "0xf3f496c9486be5924a93d67e98298733bb47057c";
+        let out = fetch_transfers(&reqwest::Client::new(), MAINNET_API_URL, user)
+            .await
+            .expect("userNonFundingLedgerUpdates responde");
+        println!("{} transferencias con contraparte", out.len());
+        for t in out.iter().take(5) {
+            println!("{t:?}");
+        }
     }
 
     /// El modo de cuenta según la respuesta real de userAbstraction

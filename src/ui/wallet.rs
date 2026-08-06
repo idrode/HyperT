@@ -3,8 +3,8 @@ use std::time::Instant;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
 
-use crate::app::App;
-use crate::data::types::{AccountSnapshot, FillInfo};
+use crate::app::{App, WalletFocus};
+use crate::data::types::{AccountSnapshot, FillInfo, TransferInfo};
 
 use super::fmt::{datetime_label, fmt_px, fmt_usd, sign_color, time_label};
 
@@ -36,7 +36,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(4), // resumen histórico
         Constraint::Length(4), // cabecera de cuenta
         Constraint::Min(4),    // posiciones abiertas
-        Constraint::Length(9), // operaciones cerradas
+        Constraint::Length(8), // wallets relacionadas (recibidos | enviados)
+        Constraint::Length(8), // operaciones cerradas
     ])
     .split(area);
 
@@ -44,6 +45,15 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     let snap = app.wallet.clone();
     let sel = app.wallet_sel;
+    // atajos propios de la vista + profundidad de la pila de pivoteo entre
+    // wallets relacionadas (solo se anuncia el "atrás" si hay a dónde volver).
+    let mut hint = format!("{} · {}", tr.wa_change_addr_hint, tr.wa_rel_hint);
+    if !app.wallet_back.is_empty() {
+        hint.push_str(
+            &tr.wa_rel_back_hint
+                .replacen("{}", &app.wallet_back.len().to_string(), 1),
+        );
+    }
     let mark_of = |c: &str| app.pairs.get(c).map(|x| x.mid).unwrap_or(0.0);
     let rows_area = draw_account(
         f,
@@ -53,7 +63,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             snap: snap.as_ref(),
             at: app.wallet_at,
             title: tr.wa_title,
-            hint: tr.wa_change_addr_hint,
+            hint: &hint,
             table_label: tr.wa_positions,
             note: None,
             sel: Some(sel),
@@ -63,11 +73,173 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     );
     app.wallet_rows_area = rows_area;
 
-    draw_closed(f, app, rows[3]);
+    draw_related(f, app, rows[3]);
+    draw_closed(f, app, rows[4]);
 
     if app.wallet_pos_modal.is_some() {
         app.overlay_drawn.set(true);
         draw_pos_modal(f, app, area);
+    } else if let Some((addr, feedback)) = app.wallet_addr_modal.clone() {
+        app.overlay_drawn.set(true);
+        super::whales::draw_addr_overlay(
+            f,
+            area,
+            &addr,
+            &feedback,
+            tr.wa_rel_modal_title,
+            tr.wa_rel_modal_hint,
+        );
+    }
+}
+
+/// Wallets relacionadas: dos listas lado a lado (fondos recibidos de / fondos
+/// enviados a) derivadas de `userNonFundingLedgerUpdates`. Enter sobre una
+/// fila abre su dirección completa, desde donde se pivota la observación.
+/// Solo aparecen movimientos CON contraparte: los depósitos/retiros del
+/// bridge no relacionan a la cuenta con otra wallet de Hyperliquid.
+fn draw_related(f: &mut Frame, app: &mut App, area: Rect) {
+    let tr = crate::i18n::t();
+    let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let loading = app.wallet_transfers_at.is_none();
+
+    let inc: Vec<TransferInfo> = app.wallet_in().into_iter().cloned().collect();
+    let out: Vec<TransferInfo> = app.wallet_out().into_iter().cloned().collect();
+
+    let (in_area, in_top) = draw_transfer_list(
+        f,
+        cols[0],
+        tr.wa_rel_in_title,
+        &inc,
+        app.wallet_in_sel,
+        app.wallet_focus == WalletFocus::In,
+        loading,
+        Color::Green,
+    );
+    let (out_area, out_top) = draw_transfer_list(
+        f,
+        cols[1],
+        tr.wa_rel_out_title,
+        &out,
+        app.wallet_out_sel,
+        app.wallet_focus == WalletFocus::Out,
+        loading,
+        Color::Red,
+    );
+    app.wallet_in_area = in_area;
+    app.wallet_in_top = in_top;
+    app.wallet_out_area = out_area;
+    app.wallet_out_top = out_top;
+}
+
+/// Una de las dos listas de wallets relacionadas. Devuelve (rect de las filas
+/// de datos, índice de la primera fila pintada) para mapear clicks con el
+/// mismo desplazamiento con el que se dibujó.
+#[allow(clippy::too_many_arguments)]
+fn draw_transfer_list(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    items: &[TransferInfo],
+    sel: usize,
+    focused: bool,
+    loading: bool,
+    accent: Color,
+) -> (Option<Rect>, usize) {
+    let tr = crate::i18n::t();
+    let header = Row::new(vec![tr.wa_col_date, "Wallet", tr.wa_col_size, tr.wa_rel_col_kind])
+        .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
+
+    // ventana visible: mantiene la fila seleccionada a la vista sin TableState
+    // (el mapeo de clicks necesita saber el desplazamiento exacto).
+    let visible = area.height.saturating_sub(3) as usize;
+    let top = if visible == 0 || sel < visible {
+        0
+    } else {
+        sel + 1 - visible
+    };
+
+    let rows: Vec<Row> = items
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(visible.max(1))
+        .map(|(i, t)| {
+            // USDC se muestra en dólares directamente; cualquier otro token, en
+            // sus propias unidades más el valor en USD que reporta la API (si
+            // lo reporta — nunca se inventa una conversión).
+            let amount = match (t.token.as_str(), t.usd) {
+                ("USDC", _) => format!("${:.2}", t.amount),
+                (tok, Some(usd)) => format!("{} {tok} ≈${usd:.2}", trim_num(t.amount)),
+                (tok, None) => format!("{} {tok}", trim_num(t.amount)),
+            };
+            let row = Row::new(vec![
+                Cell::from(time_label(t.time_ms)),
+                Cell::from(short_addr(&t.counterparty))
+                    .style(Style::new().fg(Color::Cyan)),
+                Cell::from(amount).style(Style::new().fg(accent)),
+                Cell::from(t.kind.clone()).style(Style::new().fg(Color::DarkGray)),
+            ]);
+            if focused && i == sel {
+                row.style(
+                    Style::new()
+                        .bg(Color::Rgb(40, 44, 66))
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let title = if loading {
+        format!(" {label} — {} ", tr.wa_rel_loading)
+    } else if items.is_empty() {
+        format!(" {label} — {} ", tr.wa_rel_none)
+    } else {
+        format!(" {label} ({}) ", items.len())
+    };
+    let border = if focused { Color::Cyan } else { Color::Reset };
+    let widths = [
+        Constraint::Length(14),
+        Constraint::Length(15),
+        Constraint::Length(26),
+        Constraint::Min(8),
+    ];
+    f.render_widget(
+        Table::new(rows, widths).header(header).block(
+            Block::bordered()
+                .title(title)
+                .border_style(Style::new().fg(border)),
+        ),
+        area,
+    );
+
+    if items.is_empty() || visible == 0 {
+        return (None, 0);
+    }
+    let inner = area.inner(Margin::new(1, 1));
+    let rect = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    (Some(rect), top)
+}
+
+/// Cantidad de un token con hasta 4 decimales, sin ceros de relleno (los
+/// tokens de este ledger van de 0.001 a decenas de millones).
+fn trim_num(v: f64) -> String {
+    let s = format!("{v:.4}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+fn short_addr(a: &str) -> String {
+    if a.len() > 14 {
+        format!("{}…{}", &a[..7], &a[a.len() - 4..])
+    } else {
+        a.to_string()
     }
 }
 

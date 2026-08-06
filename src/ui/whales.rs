@@ -35,7 +35,22 @@ fn draw_addr_modal(f: &mut Frame, app: &App, area: Rect) {
         Some(m) => m,
         None => return,
     };
-    let w = (addr.len() as u16 + 6).max(46).min(area.width);
+    let s = crate::i18n::t();
+    draw_addr_overlay(f, area, addr, feedback, s.wh_modal_title, s.wh_modal_copy_hint);
+}
+
+/// Overlay reusable de "dirección completa": lo comparten el modal de whale
+/// (Vista 7) y el de wallet relacionada (Vista 9), que solo cambian título y
+/// pie de atajos.
+pub(super) fn draw_addr_overlay(
+    f: &mut Frame,
+    area: Rect,
+    addr: &str,
+    feedback: &Option<String>,
+    title: &str,
+    hint: &str,
+) {
+    let w = (addr.len() as u16 + 6).max(hint.len() as u16 + 4).min(area.width);
     let h = 7u16.min(area.height);
     let r = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
@@ -50,7 +65,7 @@ fn draw_addr_modal(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = vec![
         Line::from(Span::styled(s.wh_modal_full_addr, dim)),
         Line::from(Span::styled(
-            addr.clone(),
+            addr.to_string(),
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -60,12 +75,12 @@ fn draw_addr_modal(f: &mut Frame, app: &App, area: Rect) {
             msg.clone(),
             Style::new().fg(Color::Green),
         ))),
-        None => lines.push(Line::from(Span::styled(s.wh_modal_copy_hint, dim))),
+        None => lines.push(Line::from(Span::styled(hint.to_string(), dim))),
     }
     f.render_widget(
         Paragraph::new(lines).block(
             Block::bordered()
-                .title(s.wh_modal_title)
+                .title(title.to_string())
                 .border_style(Style::new().fg(Color::Cyan)),
         ),
         r,
