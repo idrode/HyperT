@@ -55,3 +55,5 @@ cargo run --bin probe
 - Los mids llegan por WebSocket (`allMids`) en tiempo real.
 - Velas y funding history (~30d, paginado) se cargan bajo demanda al fijar un par;
   el CVD se suscribe al canal `trades` solo del par seleccionado.
+
+  <video src="assets/demo.mp4" controls width="700"></video>
