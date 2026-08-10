@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState};
 
 use crate::app::{App, WalletFocus};
 use crate::data::types::{AccountSnapshot, FillInfo, TransferInfo};
@@ -54,6 +54,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 .replacen("{}", &app.wallet_back.len().to_string(), 1),
         );
     }
+    // el estado sale del App mientras se dibuja (el cierre de mark_of toma
+    // prestado app en inmutable) y vuelve justo después con su offset ya
+    // ajustado por el widget.
+    let mut tbl_state = std::mem::take(&mut app.wallet_state);
     let mark_of = |c: &str| app.pairs.get(c).map(|x| x.mid).unwrap_or(0.0);
     let rows_area = draw_account(
         f,
@@ -68,9 +72,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             note: None,
             sel: Some(sel),
         },
+        Some(&mut tbl_state),
         rows[1],
         rows[2],
     );
+    app.wallet_state = tbl_state;
     app.wallet_rows_area = rows_area;
 
     draw_related(f, app, rows[3]);
@@ -558,6 +564,10 @@ pub(super) fn draw_account(
     f: &mut Frame,
     mark_of: &dyn Fn(&str) -> f64,
     v: AccountView,
+    // Estado de la tabla de posiciones (Vista 9): lo lleva el widget, que es
+    // quien mantiene la ventana visible pegada a la fila seleccionada. None en
+    // la Vista 8, donde la tabla no es navegable.
+    state: Option<&mut TableState>,
     hdr_area: Rect,
     tbl_area: Rect,
 ) -> Option<Rect> {
@@ -711,12 +721,19 @@ pub(super) fn draw_account(
         Constraint::Length(9),
         Constraint::Length(7),
     ];
-    f.render_widget(
-        Table::new(rows, widths)
-            .header(header)
-            .block(Block::bordered().title(title)),
-        tbl_area,
-    );
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::bordered().title(title));
+    match state {
+        // Con estado, el propio widget desplaza la ventana visible para que la
+        // fila seleccionada siempre quede a la vista (mismo mecanismo que
+        // Ranking y Flujo), y su `offset()` es lo que usa el mapeo de clicks.
+        Some(st) => {
+            st.select(Some(v.sel.unwrap_or(0).min(positions.len().saturating_sub(1))));
+            f.render_stateful_widget(table, tbl_area, st);
+        }
+        None => f.render_widget(table, tbl_area),
+    }
 
     // Zona de datos (dentro del borde + fila de cabecera) para mapear clicks.
     if v.sel.is_some() && !positions.is_empty() {

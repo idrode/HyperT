@@ -109,6 +109,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             note: unified.then_some(tr.fu_unified_note),
             sel: None,
         },
+        None,
         rows[7],
         rows[8],
     );
