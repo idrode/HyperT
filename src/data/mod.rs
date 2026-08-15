@@ -890,6 +890,37 @@ async fn fetch_account_mode(
         .ok_or_else(|| format!("respuesta inesperada: {v}"))
 }
 
+/// ¿Es una dirección de SISTEMA de Hyperliquid (protocolo), y no la wallet de
+/// una persona? Mover fondos de HyperCore al lado EVM se registra como un
+/// `spotTransfer`/`send` normal hacia una de estas, así que el filtro por TIPO
+/// de evento (que ya descarta bridge/liquidation/accountClassTransfer) no las
+/// captura: hay que descartarlas por DIRECCIÓN o se listan como si fueran
+/// contrapartes reales en las listas de wallets relacionadas (Vista 9).
+///
+/// Dos familias, ambas confirmadas contra ledgers reales de mainnet
+/// (2026-08-16, barrido de 60 cuentas top del leaderboard):
+/// - Puente por token: `0x2000…0000` + índice del token en los últimos bytes.
+///   NO es una única dirección — se observaron 10 distintas, cada una con su
+///   token coherente: `…0000` USDC (303 entradas), `…c5` UBTC, `…f1` FEUSD,
+///   `…eb` USDE, `…dd` UETH, `…01` PURR, `…79` KHYPE… Por eso se reconoce la
+///   familia entera (primer byte 0x20 + relleno de ceros, índice en los dos
+///   últimos bytes) y no un literal: excluir solo la de USDC dejaría pasar
+///   como "wallet relacionada" el puente de todos los demás tokens.
+/// - HYPE nativo: `0x2222…2222`, caso especial fuera de esa numeración
+///   (4 `spotTransfer` de HYPE observados en un ledger real).
+fn es_direccion_de_sistema(addr: &str) -> bool {
+    let lower = addr.to_ascii_lowercase();
+    let h = lower.strip_prefix("0x").unwrap_or(&lower);
+    if h.len() != 40 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    if h.chars().all(|c| c == '2') {
+        return true; // HYPE nativo en HyperEVM
+    }
+    // 0x20 + ceros + índice de token en los dos últimos bytes.
+    h.starts_with("20") && h[2..36].chars().all(|c| c == '0')
+}
+
 /// Reduce una entrada de `userNonFundingLedgerUpdates` a una transferencia con
 /// contraparte, vista DESDE `me`. None = la entrada no relaciona a `me` con
 /// otra wallet y no pinta nada en las listas de wallets relacionadas.
@@ -946,6 +977,10 @@ fn parse_transfer(e: &serde_json::Value, me: &str) -> Option<TransferInfo> {
     };
     // Una entrada que no involucra a la cuenta observada no debe colarse.
     if eq(&counterparty) {
+        return None;
+    }
+    // Ni una dirección de sistema: no es la wallet de nadie (ver más abajo).
+    if es_direccion_de_sistema(&counterparty) {
         return None;
     }
     Some(TransferInfo {
@@ -1273,6 +1308,52 @@ mod tests {
         assert!(!parse_transfer(&ent("vaultDeposit"), me).unwrap().incoming);
         assert!(parse_transfer(&ent("vaultWithdraw"), me).unwrap().incoming);
         assert!(parse_transfer(&ent("vaultDistribution"), me).unwrap().incoming);
+    }
+
+    /// Las direcciones de sistema no son wallets relacionadas. Los casos
+    /// positivos son direcciones REALES observadas en ledgers de mainnet
+    /// (barrido de 60 cuentas del leaderboard, 2026-08-16); los negativos
+    /// incluyen direcciones normales que empiezan por 0x20 o por 0x2222 sin
+    /// serlo, para que el filtro no se lleve por delante a gente de verdad.
+    #[test]
+    fn direcciones_de_sistema_no_son_contrapartes() {
+        for a in [
+            "0x2000000000000000000000000000000000000000", // USDC
+            "0x20000000000000000000000000000000000000c5", // UBTC
+            "0x20000000000000000000000000000000000000f1", // FEUSD
+            "0x2000000000000000000000000000000000000001", // PURR
+            "0x2222222222222222222222222222222222222222", // HYPE nativo
+            "0x2000000000000000000000000000000000000000".to_uppercase().as_str(),
+        ] {
+            assert!(es_direccion_de_sistema(a), "debería ser de sistema: {a}");
+        }
+        for a in [
+            "0x2000000000000000000000000000000000010000", // ceros rotos: wallet
+            "0x2222222222222222222222222222222222222223",
+            "0x20f496c9486be5924a93d67e98298733bb47057c",
+            "0xf3f496c9486be5924a93d67e98298733bb47057c",
+            "",
+            "0x20",
+        ] {
+            assert!(!es_direccion_de_sistema(a), "NO es de sistema: {a}");
+        }
+    }
+
+    /// Un `spotTransfer` hacia el puente HyperCore↔HyperEVM se descarta entero,
+    /// aunque sea un tipo de evento con contraparte válida. Entrada calcada de
+    /// una real de mainnet (HYPE al sistema 0x2222…2222).
+    #[test]
+    fn transferencia_al_puente_evm_no_es_wallet_relacionada() {
+        let me = "0x0168985218db3c45d8271ee48466ed93a5df873a";
+        let ent = |dest: &str| {
+            serde_json::json!({"time": 1, "hash": "0x1", "delta": {"type": "spotTransfer",
+                "user": me, "destination": dest, "token": "HYPE",
+                "amount": "2.0", "usdcValue": "80.0"}})
+        };
+        assert!(parse_transfer(&ent("0x2222222222222222222222222222222222222222"), me).is_none());
+        assert!(parse_transfer(&ent("0x20000000000000000000000000000000000000c5"), me).is_none());
+        // una contraparte real sigue apareciendo
+        assert!(parse_transfer(&ent("0xc272fa7d73e8ed66e65a6281570d3788bea5e7a4"), me).is_some());
     }
 
     /// Sonda real contra mainnet: el endpoint existe, responde una lista y sus
