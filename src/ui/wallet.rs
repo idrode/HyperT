@@ -3,8 +3,8 @@ use std::time::Instant;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState};
 
-use crate::app::{App, WalletFocus};
-use crate::data::types::{AccountSnapshot, FillInfo, TransferInfo};
+use crate::app::{App, WalletFocus, FRESH_POS_MS};
+use crate::data::types::{AccountSnapshot, FillInfo, PosInfo, TransferInfo};
 
 use super::fmt::{datetime_label, fmt_px, fmt_usd, sign_color, time_label};
 
@@ -44,10 +44,33 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     draw_summary(f, app, rows[0]);
 
     let snap = app.wallet.clone();
+    // Orden elegido con `s` + marca de posición abierta hace menos de 24h
+    // (misma heurística de apertura que el modal de detalle). Ambas listas van
+    // en el orden MOSTRADO, que es el que indexa la selección.
+    let order = app.wallet_order();
+    let opens = app.wallet_pos_opens();
+    let now = now_ms();
+    let sorted: Vec<PosInfo> = match snap.as_ref() {
+        Some(w) => order.iter().filter_map(|&i| w.positions.get(i).cloned()).collect(),
+        None => Vec::new(),
+    };
+    let opened: Vec<Option<(u64, bool)>> =
+        order.iter().map(|&i| opens.get(i).copied().flatten()).collect();
+    // "Recién abierta" solo se afirma con apertura EXACTA: una cota inferior
+    // (`≥`) es compatible con una posición mucho más antigua, y un falso
+    // positivo aquí engaña más de lo que informa.
+    let fresh: Vec<bool> = opened
+        .iter()
+        .map(|o| matches!(o, Some((t, true)) if now.saturating_sub(*t) < FRESH_POS_MS))
+        .collect();
     let sel = app.wallet_sel;
     // atajos propios de la vista + profundidad de la pila de pivoteo entre
     // wallets relacionadas (solo se anuncia el "atrás" si hay a dónde volver).
     let mut hint = format!("{} · {}", tr.wa_change_addr_hint, tr.wa_rel_hint);
+    hint.push_str(&tr.wa_sort_hint.replacen("{}", app.wallet_sort.label(), 1));
+    if fresh.iter().any(|&x| x) {
+        hint.push_str(&format!(" · {}", tr.wa_fresh_legend));
+    }
     if !app.wallet_back.is_empty() {
         hint.push_str(
             &tr.wa_rel_back_hint
@@ -71,6 +94,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             table_label: tr.wa_positions,
             note: None,
             sel: Some(sel),
+            positions: Some(&sorted),
+            fresh: &fresh,
+            opened: &opened,
         },
         Some(&mut tbl_state),
         rows[1],
@@ -466,6 +492,25 @@ fn draw_pos_modal(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Antigüedad compacta para la columna de la tabla: 45m / 7h / 12d.
+fn age_short(now: u64, t: u64) -> String {
+    let s = now.saturating_sub(t) / 1000;
+    if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 48 * 3600 {
+        format!("{}h", s / 3600)
+    } else {
+        format!("{}d", s / 86_400)
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn fmt_signed_usd(v: f64) -> String {
     let sign = if v >= 0.0 { "+" } else { "-" };
     format!("{sign}${}", fmt_usd(v.abs()))
@@ -553,6 +598,15 @@ pub(super) struct AccountView<'a> {
     /// Si Some(i), resalta la fila i de la tabla de posiciones (Vista 9,
     /// navegable). None = sin selección (Vista 8, tabla no interactiva).
     pub sel: Option<usize>,
+    /// Si Some, SUSTITUYE la lista de posiciones del snapshot: la Vista 9 pinta
+    /// su propio orden (tecla `s`). None = orden tal cual llega (Vista 8).
+    pub positions: Option<&'a [PosInfo]>,
+    /// Paralelo a la lista mostrada: marca de posición abierta hace <24h.
+    /// Vacío = sin marcas.
+    pub fresh: &'a [bool],
+    /// Paralelo a la lista mostrada: apertura `(ms, exacta)` para la columna de
+    /// antigüedad. Vacío = no se pinta la columna (Vista 8).
+    pub opened: &'a [Option<(u64, bool)>],
 }
 
 /// Cabecera de cuenta (valor/retirable/margen) + tabla de posiciones con mark
@@ -572,6 +626,7 @@ pub(super) fn draw_account(
     tbl_area: Rect,
 ) -> Option<Rect> {
     let tr = crate::i18n::t();
+    let now = now_ms();
     let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
     let header_lines = match v.snap {
         Some(w) => {
@@ -647,11 +702,14 @@ pub(super) fn draw_account(
         "Lev",
         "uPnL $",
         "ROE%",
+        tr.wa_col_open,
     ])
     .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
 
-    let empty = Vec::new();
-    let positions = v.snap.map(|w| &w.positions).unwrap_or(&empty);
+    let empty: Vec<PosInfo> = Vec::new();
+    let positions: &[PosInfo] = v
+        .positions
+        .unwrap_or_else(|| v.snap.map(|w| w.positions.as_slice()).unwrap_or(&empty));
     let rows: Vec<Row> = positions
         .iter()
         .enumerate()
@@ -675,8 +733,20 @@ pub(super) fn draw_account(
                 Some(liq) => (fmt_px(liq), "—".into(), Color::Gray),
                 None => ("—".into(), "—".into(), Color::DarkGray),
             };
+            // Posición recién abierta (<24h): marca "•" en magenta —
+            // deliberadamente fuera de la escala verde/rojo de PnL, que en esta
+            // tabla significa ganancia/pérdida y no debe confundirse con esto.
+            let is_fresh = v.fresh.get(i).copied().unwrap_or(false);
+            let coin_cell = if is_fresh {
+                Cell::from(Line::from(vec![
+                    Span::styled("•", Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(p.coin.clone(), Style::new().add_modifier(Modifier::BOLD)),
+                ]))
+            } else {
+                Cell::from(format!(" {}", p.coin)).style(Style::new().add_modifier(Modifier::BOLD))
+            };
             let row = Row::new(vec![
-                Cell::from(p.coin.clone()).style(Style::new().add_modifier(Modifier::BOLD)),
+                coin_cell,
                 Cell::from(side).style(Style::new().fg(side_color).add_modifier(Modifier::BOLD)),
                 Cell::from(format!("{:+.4}", p.szi)),
                 Cell::from(fmt_usd(p.position_value)),
@@ -693,6 +763,22 @@ pub(super) fn draw_account(
                     .style(Style::new().fg(sign_color(Some(p.unrealized_pnl), false))),
                 Cell::from(format!("{:+.1}", p.roe * 100.0))
                     .style(Style::new().fg(sign_color(Some(p.roe), false))),
+                // Antigüedad del tramo actual. "≥" = solo cota inferior (la
+                // ventana de userFills no llega a ver la apertura); "—" = el par
+                // no aparece en el historial disponible.
+                match v.opened.get(i).copied().flatten() {
+                    Some((t, exact)) => {
+                        let txt = format!("{}{}", if exact { "" } else { "≥" }, age_short(now, t));
+                        Cell::from(txt).style(Style::new().fg(if is_fresh {
+                            Color::Magenta
+                        } else if exact {
+                            Color::Gray
+                        } else {
+                            Color::DarkGray
+                        }))
+                    }
+                    None => Cell::from("—").style(Style::new().fg(Color::DarkGray)),
+                },
             ]);
             // resalte de la fila seleccionada (solo Vista 9, v.sel = Some)
             if v.sel == Some(i) {
@@ -709,7 +795,7 @@ pub(super) fn draw_account(
         format!(" {} {} ", positions.len(), v.table_label)
     };
     let widths = [
-        Constraint::Length(7),
+        Constraint::Length(8),
         Constraint::Length(6),
         Constraint::Length(12),
         Constraint::Length(9),
@@ -719,6 +805,7 @@ pub(super) fn draw_account(
         Constraint::Length(7),
         Constraint::Length(5),
         Constraint::Length(9),
+        Constraint::Length(7),
         Constraint::Length(7),
     ];
     let table = Table::new(rows, widths)

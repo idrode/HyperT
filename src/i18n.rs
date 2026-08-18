@@ -304,6 +304,14 @@ pub struct Strings {
     pub wa_rel_col_kind: &'static str,
     pub wa_rel_modal_title: &'static str,
     pub wa_rel_modal_hint: &'static str,
+    // orden de la tabla de posiciones (tecla `s`) + distintivo de posición nueva
+    pub wa_sort_hint: &'static str,
+    pub wa_sort_api: &'static str,
+    pub wa_sort_age: &'static str,
+    pub wa_sort_ntl: &'static str,
+    pub wa_sort_roe: &'static str,
+    pub wa_fresh_legend: &'static str,
+    pub wa_col_open: &'static str,
 
     // ── Vista 8: panel de ejecución (exec.rs / ui/exec.rs) ──
     // Textos que rodean dinero real: la traducción no debe dejar ambiguo el
@@ -544,7 +552,7 @@ pub static EN: Strings = Strings {
     foot_pair: " ←→/hl change pair · i timeframe · u reload · Esc back · L lang · ? help · q quit",
     foot_heatmap: " m metric · Esc back · Tab/1-9 views · L lang · ? help · q quit",
     foot_whales: " ↑↓/jk scroll · Enter/click address · Esc back · Tab/1-9 · L lang · ? help · q quit",
-    foot_wallet: " e address · Tab panel · ↑↓ rows · Enter detail/address · Backspace back · Esc exit · ? help",
+    foot_wallet: " e address · Tab panel · ↑↓ rows · s sort · Enter detail/address · Backspace back · Esc exit · ? help",
     foot_liq: " ←→/hl pair · r range · i timeframe · u reload · Esc back · L lang · ? help · q quit",
     foot_funds:
         " ↑↓ focus · ←→ adjust · Enter edit/confirm · x close · e SL/TP · / pair · c/d MetaMask · ? help",
@@ -745,6 +753,13 @@ pub static EN: Strings = Strings {
     wa_rel_col_kind: "Type",
     wa_rel_modal_title: " Related wallet ",
     wa_rel_modal_hint: "Enter watch this wallet · c copy · Esc/click close",
+    wa_sort_hint: " · s: sort {}",
+    wa_sort_api: "as reported",
+    wa_sort_age: "newest first",
+    wa_sort_ntl: "notional",
+    wa_sort_roe: "ROE%",
+    wa_fresh_legend: "• opened <24h",
+    wa_col_open: "Open",
 
     ex_title_real: " Order — REAL ({}, signed by the agent wallet) ",
     ex_title_mock: " Order — mock (nothing is sent) ",
@@ -978,7 +993,7 @@ pub static ES: Strings = Strings {
     foot_pair: " ←→/hl cambiar par · i temporalidad · u recargar · Esc volver · L idioma · ? ayuda · q salir",
     foot_heatmap: " m métrica · Esc volver · Tab/1-9 vistas · L idioma · ? ayuda · q salir",
     foot_whales: " ↑↓/jk desplazar · Enter/click dirección · Esc volver · Tab/1-9 · L idioma · ? ayuda · q salir",
-    foot_wallet: " e dirección · Tab panel · ↑↓ filas · Enter detalle/dirección · Backspace atrás · Esc salir · ? ayuda",
+    foot_wallet: " e dirección · Tab panel · ↑↓ filas · s orden · Enter detalle/dirección · Backspace atrás · Esc salir · ? ayuda",
     foot_liq: " ←→/hl par · r rango · i temporalidad · u recargar · Esc volver · L idioma · ? ayuda · q salir",
     foot_funds:
         " ↑↓ foco · ←→ ajusta · Enter edita/activa · x cierra · e SL/TP · / par · c/d MetaMask · ? ayuda",
@@ -1179,6 +1194,13 @@ pub static ES: Strings = Strings {
     wa_rel_col_kind: "Tipo",
     wa_rel_modal_title: " Wallet relacionada ",
     wa_rel_modal_hint: "Enter observar esta wallet · c copiar · Esc/click cerrar",
+    wa_sort_hint: " · s: orden {}",
+    wa_sort_api: "según API",
+    wa_sort_age: "más recientes",
+    wa_sort_ntl: "notional",
+    wa_sort_roe: "ROE%",
+    wa_fresh_legend: "• abierta <24h",
+    wa_col_open: "Abierta",
 
     ex_title_real: " Orden — REAL ({}, firma la agent wallet) ",
     ex_title_mock: " Orden — maqueta (sin envío real) ",
@@ -1435,6 +1457,14 @@ static HELP_EN: &[HelpRow] = &[
         "switch to the related-wallet lists · open that address (Enter there watches it)",
     ),
     HelpRow::Key("Backspace", "go back to the previously watched wallet"),
+    HelpRow::Key(
+        "s",
+        "cycle position order: as reported → newest → notional → ROE% (wallet)",
+    ),
+    HelpRow::Key(
+        "Open col.",
+        "position age · ≥ = lower bound (older than the fills window) · • = opened <24h",
+    ),
     HelpRow::Key("r", "price range ±5/15/30% (liqs)"),
     HelpRow::Blank,
     HelpRow::Section(" Funds (real balance · REAL execution on testnet with agent)"),
@@ -1497,6 +1527,14 @@ static HELP_ES: &[HelpRow] = &[
         "pasar a las listas de wallets relacionadas · abrir esa dirección (Enter ahí la observa)",
     ),
     HelpRow::Key("Backspace", "volver a la wallet observada anteriormente"),
+    HelpRow::Key(
+        "s",
+        "ciclar orden de posiciones: según API → recientes → notional → ROE% (wallet)",
+    ),
+    HelpRow::Key(
+        "col. Abierta",
+        "antigüedad · ≥ = cota inferior (fuera de la ventana de fills) · • = abierta <24h",
+    ),
     HelpRow::Key("r", "rango de precio ±5/15/30% (liqs)"),
     HelpRow::Blank,
     HelpRow::Section(" Fondos (saldo real · ejecución REAL en testnet con agent)"),

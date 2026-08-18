@@ -10,7 +10,7 @@ mod pair;
 mod ranking;
 mod search;
 mod taplot;
-mod wallet;
+pub mod wallet;
 mod whalersi;
 mod whales;
 

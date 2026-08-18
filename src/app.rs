@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::data::types::{
     AccountMode, AccountSnapshot, CandlePoint, CtxSnapshot, DataMsg, ExtraReq, FillInfo, Interval,
-    LiveOrd, PairMeta, SpotSnapshot, TransferInfo, WhaleInfo,
+    LiveOrd, PairMeta, PosInfo, SpotSnapshot, TransferInfo, WhaleInfo,
 };
 use crate::exec::{self, Confirm, ExecState, Focus, Hit, SlTpEdit};
 use crate::trader::{ExecEvent, TraderCmd};
@@ -139,6 +139,83 @@ impl FlowSort {
             FlowSort::Confluence => crate::i18n::t().fs_confluence,
         }
     }
+}
+
+/// Modos de orden de la tabla de posiciones abiertas (Vista 9), ciclados con
+/// `s` igual que `SortCol` (Vista 1) y `FlowSort` (Vista 6). Las posiciones sin
+/// dato para la clave (apertura fuera del historial de fills) van al final,
+/// nunca ordenadas como cero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletSort {
+    /// Orden en el que las devuelve `clearinghouseState` (el de siempre).
+    Api,
+    /// Antigüedad: la abierta más recientemente arriba.
+    Age,
+    /// Valor notional de la posición, de mayor a menor.
+    Notional,
+    /// ROE% (retorno sobre margen), de mayor a menor.
+    Roe,
+}
+
+impl WalletSort {
+    pub fn next(self) -> Self {
+        match self {
+            WalletSort::Api => WalletSort::Age,
+            WalletSort::Age => WalletSort::Notional,
+            WalletSort::Notional => WalletSort::Roe,
+            WalletSort::Roe => WalletSort::Api,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            WalletSort::Api => crate::i18n::t().wa_sort_api,
+            WalletSort::Age => crate::i18n::t().wa_sort_age,
+            WalletSort::Notional => crate::i18n::t().wa_sort_ntl,
+            WalletSort::Roe => crate::i18n::t().wa_sort_roe,
+        }
+    }
+}
+
+/// Antigüedad por debajo de la cual una posición se marca como recién abierta.
+pub const FRESH_POS_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Orden de las posiciones abiertas: devuelve los índices de `positions` en el
+/// orden a pintar. `opens[i]` es la apertura estimada (ms) de `positions[i]`, o
+/// `None` si no se conoce. Puro para poder testearlo sin snapshot real.
+pub fn wallet_pos_order(
+    positions: &[PosInfo],
+    opens: &[Option<(u64, bool)>],
+    sort: WalletSort,
+) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..positions.len()).collect();
+    if sort == WalletSort::Api {
+        return idx;
+    }
+    // Clave descendente en dos niveles: `rank` separa la calidad del dato (2 =
+    // apertura exacta, 1 = solo cota inferior `≥`, 0 = sin dato) para que una
+    // estimación nunca se cuele por delante de un dato firme, y `val` ordena
+    // dentro de cada nivel. Sin dato siempre al final, nunca tratado como 0.
+    let key = |i: usize| -> (u8, f64) {
+        match sort {
+            WalletSort::Api => (0, 0.0),
+            WalletSort::Age => match opens.get(i).copied().flatten() {
+                Some((t, true)) => (2, t as f64),
+                Some((t, false)) => (1, t as f64),
+                None => (0, 0.0),
+            },
+            WalletSort::Notional => (2, positions[i].position_value.abs()),
+            WalletSort::Roe => (2, positions[i].roe),
+        }
+    };
+    idx.sort_by(|&a, &b| {
+        let (ra, va) = key(a);
+        let (rb, vb) = key(b);
+        rb.cmp(&ra)
+            .then(vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal))
+            .then(a.cmp(&b))
+    });
+    idx
 }
 
 /// CVD del par seleccionado (canal `trades`). El acumulado solo tiene sentido
@@ -831,6 +908,8 @@ pub struct App {
     pub wallet_back: Vec<String>,
     /// Fila seleccionada en la tabla de posiciones abiertas (Vista 9).
     pub wallet_sel: usize,
+    /// Orden de la tabla de posiciones abiertas (tecla `s`).
+    pub wallet_sort: WalletSort,
     pub wallet_state: TableState,
     /// Si Some, modal abierto con el detalle (fecha apertura + funding) de la
     /// posición abierta de este `coin`.
@@ -991,6 +1070,7 @@ impl App {
             wallet_addr_modal: None,
             wallet_back: Vec::new(),
             wallet_sel: 0,
+            wallet_sort: WalletSort::Api,
             wallet_state: TableState::default(),
             wallet_pos_modal: None,
             wallet_rows_area: None,
@@ -1320,11 +1400,44 @@ impl App {
         self.wallet_sel = (self.wallet_sel as i64 + delta).clamp(0, n as i64 - 1) as usize;
     }
 
+    /// Apertura de cada posición abierta `(ms, exacta)`, en el orden en que las
+    /// devuelve `clearinghouseState`. Reusa la misma heurística sobre
+    /// `userFills` que ya usa el modal de detalle: `exacta=false` es una cota
+    /// inferior (la posición se abrió ESE día o antes) — sirve para ordenar,
+    /// pero no para afirmar que se abrió hace menos de 24h. `None` si el par no
+    /// aparece en el historial disponible.
+    ///
+    /// Ojo con lo estrecha que puede ser esa ventana: `userFills` corta en
+    /// ~2000 fills, que en una cuenta muy activa son minutos, no días
+    /// (verificado en una whale real: 2000 fills = 100 minutos). Por eso la
+    /// mayoría de posiciones de una whale no tendrán apertura exacta.
+    pub fn wallet_pos_opens(&self) -> Vec<Option<(u64, bool)>> {
+        let empty = Vec::new();
+        let positions = self.wallet.as_ref().map(|w| &w.positions).unwrap_or(&empty);
+        positions
+            .iter()
+            .map(|p| {
+                crate::ui::wallet::position_open_time(&self.wallet_fills, &p.coin, p.szi)
+            })
+            .collect()
+    }
+
+    /// Índices de las posiciones en el orden en que se pintan (y en el que se
+    /// mueve la selección).
+    pub fn wallet_order(&self) -> Vec<usize> {
+        let empty = Vec::new();
+        let positions = self.wallet.as_ref().map(|w| &w.positions).unwrap_or(&empty);
+        wallet_pos_order(positions, &self.wallet_pos_opens(), self.wallet_sort)
+    }
+
     /// Abre el modal de detalle (fecha de apertura + funding acumulado) de la
-    /// posición abierta seleccionada.
+    /// posición abierta seleccionada (índice sobre el orden MOSTRADO).
     fn open_wallet_pos_modal(&mut self) {
+        let Some(idx) = self.wallet_order().get(self.wallet_sel).copied() else {
+            return;
+        };
         if let Some(w) = self.wallet.as_ref() {
-            if let Some(p) = w.positions.get(self.wallet_sel) {
+            if let Some(p) = w.positions.get(idx) {
                 self.wallet_pos_modal = Some(p.coin.clone());
             }
         }
@@ -3497,6 +3610,13 @@ impl App {
                     self.open_wallet_pos_modal()
                 }
                 KeyCode::Enter => self.open_wallet_addr_modal(),
+                // mismo patrón de ciclado por `s` que Ranking (Vista 1) y Flujo
+                // (Vista 6); la selección vuelve arriba porque las filas cambian
+                // de sitio bajo el cursor.
+                KeyCode::Char('s') => {
+                    self.wallet_sort = self.wallet_sort.next();
+                    self.wallet_sel = 0;
+                }
                 KeyCode::Backspace => self.wallet_go_back(),
                 KeyCode::Esc => self.view = View::Ranking,
                 _ => {}
@@ -4599,5 +4719,85 @@ mod tests {
         assert!(app.exec.confirm.is_none());
         assert!(app.exec.confirm_phrase.is_none());
         assert!(trader_rx.try_recv().is_err());
+    }
+
+    fn pos(coin: &str, szi: f64, ntl: f64, roe: f64) -> PosInfo {
+        PosInfo {
+            coin: coin.into(),
+            szi,
+            entry_px: Some(100.0),
+            position_value: ntl,
+            unrealized_pnl: 0.0,
+            roe,
+            leverage: 5,
+            is_cross: true,
+            liq_px: None,
+            since_open_funding: 0.0,
+        }
+    }
+
+    /// El orden de la tabla de posiciones (Vista 9) por cada modo del ciclo, y
+    /// la garantía de honestidad: sin fecha de apertura conocida, la posición
+    /// va al final en el modo por antigüedad, nunca ordenada como "hace 0".
+    #[test]
+    fn orden_de_posiciones_por_modo() {
+        let ps = vec![
+            pos("BTC", 1.0, 100.0, 0.10),
+            pos("ETH", -2.0, 900.0, -0.05),
+            pos("SOL", 3.0, 500.0, 0.40),
+        ];
+        let opens = vec![Some((1_000, true)), None, Some((9_000, true))];
+
+        assert_eq!(wallet_pos_order(&ps, &opens, WalletSort::Api), vec![0, 1, 2]);
+        // más reciente primero; ETH (sin apertura conocida) al final
+        assert_eq!(wallet_pos_order(&ps, &opens, WalletSort::Age), vec![2, 0, 1]);
+
+        // una cota inferior (`≥`, apertura fuera de la ventana de fills) ordena
+        // pero NUNCA por delante de un dato exacto, por reciente que parezca:
+        // SOL (cota de hace nada) queda detrás de BTC (exacta y más antigua).
+        let mixtas = vec![Some((1_000, true)), None, Some((9_000, false))];
+        assert_eq!(wallet_pos_order(&ps, &mixtas, WalletSort::Age), vec![0, 2, 1]);
+        assert_eq!(
+            wallet_pos_order(&ps, &opens, WalletSort::Notional),
+            vec![1, 2, 0]
+        );
+        assert_eq!(wallet_pos_order(&ps, &opens, WalletSort::Roe), vec![2, 0, 1]);
+    }
+
+    /// `s` cicla el orden en Vista 9 (mismo patrón que Ranking/Flujo) y el modal
+    /// de detalle abre la posición de la FILA seleccionada en el orden mostrado,
+    /// no la del orden crudo de la API.
+    #[test]
+    fn tecla_s_ordena_y_el_modal_sigue_a_la_fila() {
+        let (mut app, _w, _u, _wc) = test_app();
+        app.view = View::Wallet;
+        set_watch(&mut app, WATCHED);
+        let addr = app.wallet_addr.clone().unwrap();
+        let mut w = snap(&addr, 1000.0);
+        w.positions = vec![pos("BTC", 1.0, 100.0, 0.1), pos("ETH", 1.0, 900.0, -0.2)];
+        app.apply_msg(DataMsg::WalletState(w));
+        app.apply_msg(DataMsg::WalletFills {
+            addr,
+            fills: Vec::new(),
+        });
+
+        assert_eq!(app.wallet_sort, WalletSort::Api);
+        assert_eq!(app.wallet_order(), vec![0, 1]);
+
+        press(&mut app, KeyCode::Char('s')); // Age
+        press(&mut app, KeyCode::Char('s')); // Notional
+        assert_eq!(app.wallet_sort, WalletSort::Notional);
+        assert_eq!(app.wallet_order(), vec![1, 0], "ETH (900) arriba");
+        assert_eq!(app.wallet_sel, 0, "la selección vuelve arriba al reordenar");
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.wallet_pos_modal.as_deref(), Some("ETH"));
+
+        // el ciclo vuelve al orden de la API tras cuatro pulsaciones
+        app.wallet_pos_modal = None;
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.wallet_sort, WalletSort::Api);
+        assert_eq!(app.wallet_order(), vec![0, 1]);
     }
 }
