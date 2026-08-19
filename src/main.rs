@@ -61,7 +61,20 @@ async fn main() -> Result<()> {
     let (usdc_tx, usdc_rx) = watch::channel(None);
     let (coin_tx, coin_rx) = watch::channel(None);
     let (wc_tx, wc_rx) = mpsc::unbounded_channel();
-    data::spawn_data_tasks(base, tx.clone(), extra_rx, wallet_rx, usdc_rx, coin_rx);
+    data::spawn_data_tasks(
+        base,
+        tx.clone(),
+        extra_rx,
+        wallet_rx,
+        usdc_rx,
+        coin_rx.clone(),
+    );
+    // Backfill OPCIONAL del historial de OI/delta desde un servidor externo
+    // (`--oi-source=URL` o `OI_SOURCE_URL`). Sin la variable, o con el
+    // servidor caído, no se lanza nada y todo sigue acumulándose en memoria.
+    if let Some(url) = data::backfill::source_url() {
+        data::backfill::spawn(base, tx.clone(), url, coin_rx);
+    }
     // Vista 8 (Fondos): depósitos van por Arbitrum One en mainnet y Sepolia en testnet
     let chain_id = if testnet { 421_614 } else { 42_161 };
     wallet::walletconnect::spawn(tx.clone(), wc_rx, chain_id);

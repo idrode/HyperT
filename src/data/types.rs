@@ -26,6 +26,26 @@ pub struct CtxSnapshot {
     pub prev_day_px: f64,
 }
 
+/// Snapshot de OI histórico del servidor de backfill (`GET /oi`). Solo se
+/// queda con lo que el TUI necesita para reconstruir ΔOI: momento, OI en
+/// unidades base y mark. El notional se recalcula con el mark, como en vivo.
+#[derive(Debug, Clone, Copy)]
+pub struct BackfillOi {
+    /// Hora de pared del snapshot, ms epoch.
+    pub ts_ms: u64,
+    pub oi: f64,
+    pub mark_px: f64,
+}
+
+/// Bucket de 1 minuto de volumen agresor del servidor de backfill
+/// (`GET /delta`), mismo esquema que los buckets en memoria de `DeltaState`.
+#[derive(Debug, Clone, Copy)]
+pub struct BackfillDelta {
+    pub minute_ms: u64,
+    pub buy_vol: f64,
+    pub sell_vol: f64,
+}
+
 /// Temporalidad de velas de la vista de par / liquidaciones.
 /// Los 7 valores están verificados contra `candleSnapshot` de la API real
 /// (2026-07-16): todos devuelven velas con el string de `api()` tal cual.
@@ -386,6 +406,14 @@ pub enum DataMsg {
     /// Fase de la transferencia interna spot⇄perps (usdClassTransfer):
     /// firma EIP-712 → aceptada → reflejada en el saldo destino (o fallo).
     Transfer(crate::wallet::walletconnect::TransferStatus),
+    /// Historial traído de un servidor de backfill externo (opcional, ver
+    /// `data::backfill`): snapshots de OI y buckets de delta de 1 min de un
+    /// par, para sembrar el historial en memoria en vez de arrancar vacío.
+    Backfill {
+        coin: String,
+        oi: Vec<BackfillOi>,
+        delta: Vec<BackfillDelta>,
+    },
     WsStatus(bool),
     RestError(String),
 }

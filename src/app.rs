@@ -9,8 +9,9 @@ use ratatui::widgets::TableState;
 use tokio::sync::{mpsc, watch};
 
 use crate::data::types::{
-    AccountMode, AccountSnapshot, CandlePoint, CtxSnapshot, DataMsg, ExtraReq, FillInfo, Interval,
-    LiveOrd, OpenEst, OpenKind, PairMeta, PosInfo, SpotSnapshot, TransferInfo, WhaleInfo,
+    AccountMode, AccountSnapshot, BackfillDelta, BackfillOi, CandlePoint, CtxSnapshot, DataMsg,
+    ExtraReq, FillInfo, Interval, LiveOrd, OpenEst, OpenKind, PairMeta, PosInfo, SpotSnapshot,
+    TransferInfo, WhaleInfo,
 };
 use crate::exec::{self, Confirm, ExecState, Focus, Hit, SlTpEdit};
 use crate::liqdens::LiqBar;
@@ -51,6 +52,23 @@ const EXTRA_INFLIGHT: Duration = Duration::from_secs(3);
 /// Sin datos WS de un par en este margen, el mid del par se considera stale y
 /// el poller REST vuelve a alimentarlo (allMids llega cada ~5s; 3× margen).
 pub const MID_STALE: Duration = Duration::from_secs(15);
+/// Hora de pared en ms epoch: ancla para convertir los timestamps absolutos
+/// del backfill externo a los `Instant` del historial en memoria.
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Cuánto historial se le pide al servidor de backfill opcional
+/// (`data::backfill`): OI hasta 25h atrás (ventana lenta de 24h + margen) y
+/// delta por vela hasta 48h (la capacidad de `DeltaState`).
+pub const OI_LOOKBACK_MS: u64 = 25 * 3600 * 1000;
+pub const DELTA_LOOKBACK_MS: u64 = 48 * 3600 * 1000;
+/// Espaciado mínimo entre muestras sembradas en el historial rápido: la misma
+/// cadencia del poller de contextos, para que HIST_CAP siga cubriendo ~1h.
+const SEED_FAST_STEP: Duration = Duration::from_secs(5);
 /// Rangos de precio del mapa de liquidaciones (±%).
 const LIQ_RANGES: [f64; 3] = [0.05, 0.15, 0.30];
 /// Buckets de OI por cierre de vela retenidos por par e intervalo
@@ -285,6 +303,9 @@ pub struct DeltaState {
     /// Segundos de actividad desde `start` en el último trade — clave estable
     /// de caché del raster entre trades (evita re-rasterizar por frame).
     last_secs: u64,
+    /// Nº de siembras de backfill aplicadas: entra en la clave de caché del
+    /// raster para que se rehaga cuando llega historial nuevo por detrás.
+    seeds: u64,
 }
 
 impl DeltaState {
@@ -294,6 +315,7 @@ impl DeltaState {
             mins: VecDeque::new(),
             start: Instant::now(),
             last_secs: 0,
+            seeds: 0,
         }
     }
 
@@ -345,10 +367,37 @@ impl DeltaState {
             .collect()
     }
 
+    /// Siembra buckets de minuto traídos del servidor de backfill externo
+    /// (`data::backfill`), para que el delta por vela no empiece de cero al
+    /// arrancar o al cambiar de par. Solo se insertan buckets anteriores al
+    /// más antiguo ya acumulado en vivo: los trades del WS mandan.
+    pub fn seed(&mut self, buckets: &[BackfillDelta]) {
+        let first = self.mins.front().map(|(m, ..)| *m);
+        let pre: Vec<(u64, f64, f64)> = buckets
+            .iter()
+            .map(|b| (b.minute_ms - b.minute_ms % 60_000, b.buy_vol, b.sell_vol))
+            .filter(|(m, ..)| first.is_none_or(|f| *m < f))
+            .collect();
+        if pre.is_empty() {
+            return;
+        }
+        for b in pre.into_iter().rev() {
+            self.mins.push_front(b);
+        }
+        while self.mins.len() > DELTA_MIN_CAP {
+            self.mins.pop_front();
+        }
+        self.seeds += 1;
+    }
+
     /// Clave de caché del raster: cambia al llegar trades nuevos (por segundo),
-    /// al cambiar de TF o al desplazarse la ventana visible.
+    /// al cambiar de TF, al desplazarse la ventana visible o al sembrar.
     pub fn raster_key(&self, iv_ms: u64, start: usize, len: usize) -> u64 {
-        self.last_secs ^ iv_ms.rotate_left(17) ^ ((start as u64) << 40) ^ ((len as u64) << 20)
+        self.last_secs
+            ^ iv_ms.rotate_left(17)
+            ^ ((start as u64) << 40)
+            ^ ((len as u64) << 20)
+            ^ self.seeds.rotate_left(53)
     }
 }
 
@@ -363,8 +412,10 @@ pub struct SlowPoint {
     pub t: Instant,
     pub oi: f64,
     pub mark: f64,
-    /// Volumen notional rolling 24h en el instante de la muestra.
-    pub vol24: f64,
+    /// Volumen notional rolling 24h en el instante de la muestra. `None` en
+    /// muestras sembradas desde el backfill externo: el servidor no graba el
+    /// volumen, y contarlo como 0 falsearía el volumen de la ventana.
+    pub vol24: Option<f64>,
     pub premium_bps: Option<f64>,
 }
 
@@ -487,6 +538,86 @@ impl PairState {
         bars
     }
 
+    /// Siembra el historial de OI con snapshots reales de un servidor externo
+    /// (`data::backfill`), en vez de arrancar vacío y esperar horas de uptime.
+    ///
+    /// `pts` llega ascendente y en hora de pared; el historial en memoria usa
+    /// `Instant`, así que se ancla cada muestra a `now − (ahora_ms − ts_ms)`.
+    /// Solo se insertan muestras ANTERIORES a la más antigua ya acumulada: lo
+    /// que el TUI vio en vivo manda siempre sobre lo que cuente el servidor.
+    pub fn seed_history(&mut self, pts: &[BackfillOi], now: Instant, now_ms: u64) {
+        let to_inst = |ts: u64| {
+            (ts <= now_ms)
+                .then(|| now.checked_sub(Duration::from_millis(now_ms - ts)))
+                .flatten()
+        };
+
+        // historial rápido (ΔOI 5m/1h de Ranking/Heatmap)
+        let limit = self.hist.front().map(|h| h.t);
+        let mut last: Option<Instant> = None;
+        let mut seeds: Vec<HistPoint> = Vec::new();
+        for pt in pts {
+            let Some(t) = to_inst(pt.ts_ms) else { continue };
+            if limit.is_some_and(|f| t >= f) {
+                break;
+            }
+            if last.is_some_and(|l| t.duration_since(l) < SEED_FAST_STEP) {
+                continue;
+            }
+            last = Some(t);
+            seeds.push(HistPoint {
+                t,
+                mark: pt.mark_px,
+                oi: pt.oi,
+            });
+        }
+        for h in seeds.into_iter().rev() {
+            self.hist.push_front(h);
+        }
+        while self.hist.len() > HIST_CAP {
+            self.hist.pop_front();
+        }
+
+        // historial lento (rotación ΔOI 1h/4h/24h de la Vista 6)
+        let limit = self.slow_hist.front().map(|p| p.t);
+        let mut last: Option<Instant> = None;
+        let mut seeds: Vec<SlowPoint> = Vec::new();
+        for pt in pts {
+            let Some(t) = to_inst(pt.ts_ms) else { continue };
+            if limit.is_some_and(|f| t >= f) {
+                break;
+            }
+            if last.is_some_and(|l| t.duration_since(l) < SLOW_THROTTLE) {
+                continue;
+            }
+            last = Some(t);
+            seeds.push(SlowPoint {
+                t,
+                oi: pt.oi,
+                mark: pt.mark_px,
+                // el servidor no graba volumen 24h ni premium: se marcan como
+                // ausentes para que las métricas que dependen de ellos sigan
+                // diciendo "—" en vez de inventarse un 0
+                vol24: None,
+                premium_bps: None,
+            });
+        }
+        for p in seeds.into_iter().rev() {
+            self.slow_hist.push_front(p);
+        }
+        while self.slow_hist.len() > SLOW_HIST_CAP {
+            self.slow_hist.pop_front();
+        }
+
+        // OI por cierre de vela: solo si aún no hay nada acumulado en vivo
+        // (push_oi_candles asume orden creciente y escribe por la cola).
+        if self.oi_candles.values().all(|d| d.is_empty()) {
+            for pt in pts {
+                self.push_oi_candles(pt.ts_ms, pt.oi);
+            }
+        }
+    }
+
     /// Muestrea el contexto actual en el historial lento (throttle 1/min).
     fn push_slow(&mut self, t: Instant) {
         let push = self
@@ -504,7 +635,7 @@ impl PairState {
             t,
             oi: c.open_interest,
             mark: c.mark_px,
-            vol24: c.day_ntl_vlm,
+            vol24: Some(c.day_ntl_vlm),
             premium_bps,
         });
         while self.slow_hist.len() > SLOW_HIST_CAP {
@@ -608,7 +739,7 @@ impl PairState {
         let old = self.slow_point_at(window)?;
         let cur = self.slow_hist.back()?;
         let w_frac = window.as_secs_f64() / 86_400.0;
-        Some(flow::window_vol_est(cur.vol24, old.vol24, w_frac))
+        Some(flow::window_vol_est(cur.vol24?, old.vol24?, w_frac))
     }
 
     /// Volumen de la ventana sobre su volumen típico (rolling 24h prorrateado):
@@ -616,7 +747,7 @@ impl PairState {
     pub fn window_vol_ratio(&self, window: Duration) -> Option<f64> {
         let est = self.window_vol_est(window)?;
         let cur = self.slow_hist.back()?;
-        let typical = cur.vol24 * window.as_secs_f64() / 86_400.0;
+        let typical = cur.vol24? * window.as_secs_f64() / 86_400.0;
         if typical <= 0.0 {
             return None;
         }
@@ -995,6 +1126,10 @@ pub struct App {
     /// Delta por vela del par seleccionado (Vista 2); None hasta el primer
     /// batch de trades. Comparte el canal `trades` con el CVD.
     pub delta: Option<DeltaState>,
+    /// Backfill de OI llegado antes de que el par existiera en `pairs` (el
+    /// primer poll de contextos aún no había vuelto): se aplica en cuanto el
+    /// par aparece. Vacío en cuanto se consume; sin servidor, nunca se usa.
+    pending_backfill: HashMap<String, Vec<BackfillOi>>,
     // liquidaciones
     pub liq_range_idx: usize,
     /// Última posición del ratón (col, fila) para el hover de velas.
@@ -1118,6 +1253,7 @@ impl App {
             search: search::SearchState::default(),
             cvd: None,
             delta: None,
+            pending_backfill: HashMap::new(),
             liq_range_idx: 1,
             mouse_pos: None,
             gfx,
@@ -1185,6 +1321,10 @@ impl App {
                     // y que el sparkline de mid tampoco se congele
                     if ws_stale && p.mid > 0.0 {
                         p.push_mid(snap.t, p.mid);
+                    }
+                    // backfill que llegó antes que el par (arranque en frío)
+                    if let Some(pts) = self.pending_backfill.remove(&p.meta.name) {
+                        p.seed_history(&pts, Instant::now(), wall_ms());
                     }
                     p.ctx = Some(snap);
                     p.push_slow(snap.t);
@@ -1283,6 +1423,27 @@ impl App {
                     }
                     if let Some(st) = &mut self.delta {
                         st.push(buy_ntl, sell_ntl, t_ms);
+                    }
+                }
+            }
+            DataMsg::Backfill { coin, oi, delta } => {
+                if !oi.is_empty() {
+                    match self.pairs.get_mut(&coin) {
+                        Some(p) => p.seed_history(&oi, Instant::now(), wall_ms()),
+                        // aún no hay contextos: se guarda para cuando aparezca
+                        None => {
+                            self.pending_backfill.insert(coin.clone(), oi);
+                        }
+                    }
+                }
+                // el delta por vela solo existe para el par seleccionado; si el
+                // usuario ya cambió de par, esta respuesta se descarta
+                if !delta.is_empty() && self.selected_coin.as_deref() == Some(coin.as_str()) {
+                    if self.delta.as_ref().is_none_or(|s| s.coin != coin) {
+                        self.delta = Some(DeltaState::new(coin));
+                    }
+                    if let Some(st) = &mut self.delta {
+                        st.seed(&delta);
                     }
                 }
             }
@@ -3760,6 +3921,123 @@ mod tests {
         // vela de 5m con apertura = primer min rastreado (min 0..4) suma 0..2
         let c5b = candle(m(0) + iv5 - 1); // apertura = m(0), cierre en min 4
         assert_eq!(d.per_candle(&[c5b], iv5)[0], Some(450.0));
+    }
+
+    /// El backfill de delta se inserta por delante de lo acumulado en vivo,
+    /// nunca lo pisa, y extiende el warmup hacia atrás (velas que antes eran
+    /// `None` pasan a tener delta real).
+    #[test]
+    fn delta_seed_solo_rellena_por_detras() {
+        let mut d = DeltaState::new("BTC".into());
+        let m = |k: u64| 1_000 * 60_000 + k * 60_000;
+        d.push(300.0, 100.0, m(2) + 5); // en vivo: min 2, neto +200
+
+        let key_antes = d.raster_key(60_000, 0, 10);
+        d.seed(&[
+            BackfillDelta {
+                minute_ms: m(0),
+                buy_vol: 10.0,
+                sell_vol: 4.0,
+            },
+            BackfillDelta {
+                minute_ms: m(1),
+                buy_vol: 1.0,
+                sell_vol: 5.0,
+            },
+            // mismo minuto que ya hay en vivo: se descarta, el WS manda
+            BackfillDelta {
+                minute_ms: m(2),
+                buy_vol: 999.0,
+                sell_vol: 0.0,
+            },
+        ]);
+
+        let iv = 60_000;
+        let cl = |k: u64| m(k) + iv - 1;
+        let out = d.per_candle(&[candle(cl(0)), candle(cl(1)), candle(cl(2))], iv);
+        assert_eq!(out, vec![Some(6.0), Some(-4.0), Some(200.0)]);
+        // la vela anterior al primer minuto sembrado sigue sin dato (honesto)
+        assert_eq!(d.per_candle(&[candle(m(0) - 1)], iv)[0], None);
+        // y el raster se invalida para que la barra se repinte con lo nuevo
+        assert_ne!(key_antes, d.raster_key(60_000, 0, 10));
+    }
+
+    /// Sembrar OI histórico habilita las ventanas de ΔOI que en frío dirían "—",
+    /// sin inventar volumen 24h para las métricas que dependen de él.
+    #[test]
+    fn seed_history_habilita_ventanas_de_oi() {
+        let mut p = PairState::new(PairMeta {
+            name: "BTC".into(),
+            sz_decimals: 3,
+            max_leverage: 40,
+        });
+        let now = Instant::now();
+        let now_ms = 10_000 * 60_000;
+        // sin historial, 1h no tiene cobertura
+        assert_eq!(p.oi_delta_pct(OI_WIN_LONG), None);
+
+        // punto en vivo (el más reciente) + 90 min de backfill por detrás
+        p.hist.push_back(HistPoint {
+            t: now,
+            mark: 100.0,
+            oi: 110.0,
+        });
+        p.slow_hist.push_back(SlowPoint {
+            t: now,
+            oi: 110.0,
+            mark: 100.0,
+            vol24: Some(1_000.0),
+            premium_bps: None,
+        });
+        let pts: Vec<BackfillOi> = (0..=90)
+            .map(|k: u64| BackfillOi {
+                ts_ms: now_ms - (90 - k) * 60_000,
+                oi: 100.0,
+                mark_px: 100.0,
+            })
+            .collect();
+        p.seed_history(&pts, now, now_ms);
+
+        // ΔOI 5m y 1h ya calculables: 100 → 110 = +10%
+        let d5 = p.oi_delta_pct(OI_WIN_SHORT).unwrap();
+        let d1h = p.oi_delta_pct(OI_WIN_LONG).unwrap();
+        assert!((d5 - 10.0).abs() < 1e-9 && (d1h - 10.0).abs() < 1e-9);
+        assert!((p.oi_delta_pct_slow(OI_WIN_LONG).unwrap() - 10.0).abs() < 1e-9);
+        // el volumen de ventana NO se inventa: el punto sembrado no trae vol24
+        assert_eq!(p.window_vol_est(OI_WIN_LONG), None);
+        // el histórico en vivo sigue siendo el último punto, no lo pisa nadie
+        assert_eq!(p.hist.back().map(|h| h.oi), Some(110.0));
+    }
+
+    /// El backfill nunca reescribe lo que el TUI vio en vivo: los puntos
+    /// posteriores al más antiguo en memoria se descartan.
+    #[test]
+    fn seed_history_no_pisa_lo_acumulado_en_vivo() {
+        let mut p = PairState::new(PairMeta {
+            name: "BTC".into(),
+            sz_decimals: 3,
+            max_leverage: 40,
+        });
+        let now = Instant::now();
+        let now_ms = 10_000 * 60_000;
+        p.hist.push_back(HistPoint {
+            t: now - Duration::from_secs(600),
+            mark: 100.0,
+            oi: 50.0,
+        });
+        let pts: Vec<BackfillOi> = [700u64, 300]
+            .iter()
+            .map(|s| BackfillOi {
+                ts_ms: now_ms - s * 1000,
+                oi: 999.0,
+                mark_px: 1.0,
+            })
+            .collect();
+        p.seed_history(&pts, now, now_ms);
+        // solo entra el de hace 700s (anterior al vivo); el de 300s se ignora
+        assert_eq!(p.hist.len(), 2);
+        assert_eq!(p.hist.front().map(|h| h.oi), Some(999.0));
+        assert_eq!(p.hist.back().map(|h| h.oi), Some(50.0));
     }
 
     const MASTER: &str = "0x000000000000000000000000000000000000dead";
