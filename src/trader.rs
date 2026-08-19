@@ -23,8 +23,8 @@
 
 use alloy::signers::local::PrivateKeySigner;
 use hyperliquid_rust_sdk::{
-    BaseUrl, ClientCancelRequest, ClientLimit, ClientOrder, ClientOrderRequest,
-    ExchangeClient, ExchangeDataStatus, ExchangeResponseStatus, InfoClient,
+    BaseUrl, ClientCancelRequest, ClientLimit, ClientOrder, ClientOrderRequest, ExchangeClient,
+    ExchangeDataStatus, ExchangeResponseStatus, InfoClient,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -191,7 +191,12 @@ fn trigger_req(
 /// EXPLÍCITAMENTE (paso 7.5): testnet y mainnet, cada una con su propia agent
 /// key por archivo (el caller carga `agent_<red>.json` y el loader verifica
 /// el `hyperliquid_chain` del archivo). Cualquier otra red se rechaza.
-pub fn spawn(base: BaseUrl, tx: UnboundedSender<DataMsg>, rx: UnboundedReceiver<TraderCmd>, agent: LoadedAgent) {
+pub fn spawn(
+    base: BaseUrl,
+    tx: UnboundedSender<DataMsg>,
+    rx: UnboundedReceiver<TraderCmd>,
+    agent: LoadedAgent,
+) {
     let net = match base {
         BaseUrl::Testnet => "testnet",
         BaseUrl::Mainnet => "mainnet",
@@ -298,7 +303,10 @@ async fn handle(
                     (market_px(*mid, *is_buy, *sz_decimals), "Ioc")
                 }
             };
-            phase(format!("enviando {} {coin}…", if *is_buy { "LONG" } else { "SHORT" }));
+            phase(format!(
+                "enviando {} {coin}…",
+                if *is_buy { "LONG" } else { "SHORT" }
+            ));
             let resp = ex
                 .order(
                     ClientOrderRequest {
@@ -553,9 +561,10 @@ mod tests {
         assert!(filled_sz(&filled) == Some(0.01));
         assert!(flatten_response(filled).unwrap().contains("llenada"));
 
-        let top: ExchangeResponseStatus =
-            serde_json::from_str(r#"{"status":"err","response":"User or API Wallet does not exist."}"#)
-                .unwrap();
+        let top: ExchangeResponseStatus = serde_json::from_str(
+            r#"{"status":"err","response":"User or API Wallet does not exist."}"#,
+        )
+        .unwrap();
         assert!(flatten_response(top).is_err());
     }
 

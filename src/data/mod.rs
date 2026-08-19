@@ -1,3 +1,4 @@
+pub mod opens;
 pub mod types;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -35,10 +36,17 @@ const WHALE_POLL_SECS: u64 = 60;
 /// Pausa entre clearinghouseState consecutivos para no agotar el rate limit.
 const WHALE_STEP_MS: u64 = 200;
 const LEADERBOARD_REFRESH: Duration = Duration::from_secs(30 * 60);
+/// Cuántos fallos del escaneo de whales se detallan (dirección + error) en la
+/// tira de error. Suficiente para ver si todos comparten causa (rate limit,
+/// timeout) sin desbordar una línea de estado si fallan decenas de cuentas.
+const WHALE_ERR_SAMPLES: usize = 3;
 const WALLET_POLL_SECS: u64 = 10;
 /// El historial de fills (userFills) cambia despacio comparado con el estado
 /// de posiciones: se refresca más espaciado que el clearinghouseState de 10s.
 const FILLS_REFRESH: Duration = Duration::from_secs(60);
+/// Las aperturas se reconstruyen con decenas de peticiones: se rehacen solo al
+/// cambiar de wallet observada o cada 10 minutos.
+const OPENS_REFRESH: Duration = Duration::from_secs(600);
 /// Cadencia del saldo USDC on-chain (RPC público de Arbitrum: ser educados).
 const USDC_POLL_SECS: u64 = 30;
 
@@ -557,6 +565,27 @@ fn parse_fill(f: &hyperliquid_rust_sdk::UserFillsResponse) -> FillInfo {
     }
 }
 
+/// Mismo `FillInfo` pero desde el JSON crudo: `userFillsByTime` no está en el
+/// SDK pineado, así que su respuesta se parsea a mano (misma forma que
+/// `userFills`, verificado contra la API real).
+fn parse_fill_json(f: &serde_json::Value) -> Option<FillInfo> {
+    let g = |k: &str| f.get(k).and_then(|v| v.as_str()).map(pf).unwrap_or(0.0);
+    Some(FillInfo {
+        coin: f.get("coin")?.as_str()?.to_string(),
+        dir: f
+            .get("dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        px: g("px"),
+        sz: g("sz"),
+        start_position: g("startPosition"),
+        closed_pnl: g("closedPnl"),
+        fee: g("fee"),
+        time_ms: f.get("time")?.as_u64()?,
+    })
+}
+
 fn parse_positions(st: &UserStateResponse) -> Vec<PosInfo> {
     st.asset_positions
         .iter()
@@ -599,6 +628,21 @@ async fn fetch_leaderboard(url: &str) -> anyhow::Result<Vec<Address>> {
     Ok(accs.into_iter().map(|(_, a)| a).collect())
 }
 
+/// Mensaje de la tira para fallos del escaneo de whales: conteo + las primeras
+/// direcciones que fallaron con su error real, para poder diagnosticar el fallo
+/// a posteriori sin tener que reproducirlo.
+fn whale_err_msg(errs: usize, total: usize, samples: &[String]) -> String {
+    let mut m = format!("whales: {errs}/{total} cuentas fallaron");
+    if !samples.is_empty() {
+        m.push_str(" · ");
+        m.push_str(&samples.join(" | "));
+        if errs > samples.len() {
+            m.push_str(&format!(" (+{} más)", errs - samples.len()));
+        }
+    }
+    m
+}
+
 async fn whale_watcher(base: BaseUrl, tx: UnboundedSender<DataMsg>) {
     let info = new_client_retrying(base, &tx).await;
     let lb_url = match base {
@@ -635,6 +679,10 @@ async fn whale_watcher(base: BaseUrl, tx: UnboundedSender<DataMsg>) {
         // clearinghouseState dirección a dirección, con pausa entre llamadas.
         let mut whales: Vec<WhaleInfo> = Vec::new();
         let mut errs = 0usize;
+        // muestras de los primeros fallos (dirección + error real). Descartar el
+        // error con `Err(_)` dejaba la tira con un conteo pelado ("N/100 cuentas
+        // fallaron") imposible de diagnosticar sin reproducir el fallo primero.
+        let mut err_samples: Vec<String> = Vec::new();
         for (i, a) in addrs.iter().enumerate() {
             match info.user_state(*a).await {
                 Ok(st) => {
@@ -647,7 +695,12 @@ async fn whale_watcher(base: BaseUrl, tx: UnboundedSender<DataMsg>) {
                         });
                     }
                 }
-                Err(_) => errs += 1,
+                Err(e) => {
+                    errs += 1;
+                    if err_samples.len() < WHALE_ERR_SAMPLES {
+                        err_samples.push(format!("{a}: {e}"));
+                    }
+                }
             }
             // en el primer escaneo, ir volcando parciales para que la vista
             // no espere ~30s en blanco; en rescans se sustituye entera al final
@@ -662,9 +715,10 @@ async fn whale_watcher(base: BaseUrl, tx: UnboundedSender<DataMsg>) {
             sleep(Duration::from_millis(WHALE_STEP_MS)).await;
         }
         if errs > 0 {
-            let _ = tx.send(DataMsg::RestError(format!(
-                "whales: {errs}/{} cuentas fallaron",
-                addrs.len()
+            let _ = tx.send(DataMsg::RestError(whale_err_msg(
+                errs,
+                addrs.len(),
+                &err_samples,
             )));
         }
         let _ = tx.send(DataMsg::WhaleStatus(format!(
@@ -949,7 +1003,13 @@ fn parse_transfer(e: &serde_json::Value, me: &str) -> Option<TransferInfo> {
             let usdc = num(&d["usdc"])?;
             let incoming = eq(to);
             let other = if incoming { from } else { to };
-            (other.to_string(), incoming, "USDC".to_string(), usdc, Some(usdc))
+            (
+                other.to_string(),
+                incoming,
+                "USDC".to_string(),
+                usdc,
+                Some(usdc),
+            )
         }
         "spotTransfer" | "send" => {
             let from = d["user"].as_str()?;
@@ -971,7 +1031,13 @@ fn parse_transfer(e: &serde_json::Value, me: &str) -> Option<TransferInfo> {
             let vault = d["vault"].as_str()?;
             let usdc = num(&d["usdc"])?;
             let incoming = kind != "vaultDeposit";
-            (vault.to_string(), incoming, "USDC".to_string(), usdc, Some(usdc))
+            (
+                vault.to_string(),
+                incoming,
+                "USDC".to_string(),
+                usdc,
+                Some(usdc),
+            )
         }
         _ => return None,
     };
@@ -1055,7 +1121,9 @@ pub(crate) async fn fetch_open_orders(
         serde_json::json!({"type": "frontendOpenOrders", "user": user}),
     )
     .await?;
-    let arr = v.as_array().ok_or_else(|| format!("respuesta inesperada: {v}"))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| format!("respuesta inesperada: {v}"))?;
     Ok(arr.iter().filter_map(parse_open_order).collect())
 }
 
@@ -1152,7 +1220,14 @@ async fn wallet_watcher(
     let api = info_api(base);
     // Última vez que se pidió userFills por dirección, para espaciarlo (60s)
     // respecto al clearinghouseState (10s) — el historial cambia despacio.
-    let mut fills_at: std::collections::HashMap<Address, Instant> = std::collections::HashMap::new();
+    let mut fills_at: std::collections::HashMap<Address, Instant> =
+        std::collections::HashMap::new();
+    // Igual para la reconstrucción de aperturas, que es mucho más cara, y las
+    // posiciones del último snapshot (entrada del resolver).
+    let mut opens_at: std::collections::HashMap<Address, Instant> =
+        std::collections::HashMap::new();
+    let mut last_positions: std::collections::HashMap<Address, Vec<(String, f64, f64)>> =
+        std::collections::HashMap::new();
     loop {
         let targets = rx.borrow_and_update().clone();
         if targets.is_empty() {
@@ -1163,13 +1238,24 @@ async fn wallet_watcher(
         }
         // Purga direcciones que ya no se observan para no filtrar memoria.
         fills_at.retain(|a, _| targets.contains(a));
+        opens_at.retain(|a, _| targets.contains(a));
+        last_positions.retain(|a, _| targets.contains(a));
+        // la watch-only de la Vista 9 es la PRIMERA de la lista de targets
+        // (`push_wallet_targets` la pone antes que la maestra WC); la maestra
+        // no necesita este barrido: la Vista 8 no muestra antigüedad.
+        let watch_only = targets.first().copied();
         for addr in targets {
             match info.user_state(addr).await {
                 Ok(st) => {
-                    let _ = tx.send(DataMsg::WalletState(account_snapshot(
-                        format!("{addr}"),
-                        &st,
-                    )));
+                    let snap = account_snapshot(format!("{addr}"), &st);
+                    last_positions.insert(
+                        addr,
+                        snap.positions
+                            .iter()
+                            .map(|p| (p.coin.clone(), p.szi, p.since_open_funding))
+                            .collect(),
+                    );
+                    let _ = tx.send(DataMsg::WalletState(snap));
                 }
                 Err(e) => {
                     let _ = tx.send(DataMsg::RestError(format!("wallet: {e}")));
@@ -1177,7 +1263,9 @@ async fn wallet_watcher(
             }
             // Historial de operaciones, refrescado más espaciado (o al instante
             // la primera vez que se ve la dirección, tras un cambio de `e`).
-            let due = fills_at.get(&addr).is_none_or(|t| t.elapsed() > FILLS_REFRESH);
+            let due = fills_at
+                .get(&addr)
+                .is_none_or(|t| t.elapsed() > FILLS_REFRESH);
             if due {
                 if let Ok(raw) = info.user_fills(addr).await {
                     let fills = raw.iter().map(parse_fill).collect();
@@ -1202,6 +1290,32 @@ async fn wallet_watcher(
                 }
                 fills_at.insert(addr, Instant::now());
             }
+            // Reconstrucción de aperturas: decenas de peticiones, así que va en
+            // su propia tarea (no bloquea el ciclo de 10s) y muy espaciada. Solo
+            // para la watch-only: la maestra WC comparte watcher pero la Vista 8
+            // no muestra antigüedad.
+            let opens_due = opens_at
+                .get(&addr)
+                .is_none_or(|t| t.elapsed() > OPENS_REFRESH);
+            if opens_due && watch_only.as_ref() == Some(&addr) {
+                if let Some(pos) = last_positions.get(&addr) {
+                    if !pos.is_empty() {
+                        opens_at.insert(addr, Instant::now());
+                        let (c, a, u, tx2, pos) = (
+                            http.clone(),
+                            api.to_string(),
+                            format!("{addr}"),
+                            tx.clone(),
+                            pos.clone(),
+                        );
+                        tokio::spawn(async move {
+                            let now = now_ms();
+                            let opens = opens::resolve(&c, &a, &u, &pos, now).await;
+                            let _ = tx2.send(DataMsg::WalletOpens { addr: u, opens });
+                        });
+                    }
+                }
+            }
         }
         tokio::select! {
             _ = sleep(Duration::from_secs(WALLET_POLL_SECS)) => {}
@@ -1217,6 +1331,26 @@ async fn wallet_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// La tira de fallos de whales debe llevar el error real y las direcciones,
+    /// no solo el conteo — sin eso el "65/100 cuentas fallaron" no se puede
+    /// diagnosticar salvo reproduciéndolo.
+    #[test]
+    fn whale_err_msg_incluye_direcciones_y_error() {
+        let s = vec![
+            "0xaaa: 429 Too Many Requests".to_string(),
+            "0xbbb: timeout".to_string(),
+        ];
+        let m = whale_err_msg(65, 100, &s);
+        assert!(m.starts_with("whales: 65/100 cuentas fallaron"));
+        assert!(m.contains("0xaaa: 429 Too Many Requests"));
+        assert!(m.contains("0xbbb: timeout"));
+        assert!(m.contains("(+63 más)"));
+        // sin muestras (caso imposible hoy, pero no debe inventar sufijos)
+        assert_eq!(whale_err_msg(2, 100, &[]), "whales: 2/100 cuentas fallaron");
+        // si se detallan todos, no se añade el "+N más"
+        assert!(!whale_err_msg(2, 100, &s).contains("más"));
+    }
 
     /// Reducción del spotClearinghouseState real (forma verificada contra
     /// testnet el 2026-07-20): USDC separado con su hold, otros tokens solo
@@ -1284,7 +1418,10 @@ mod tests {
         let sent = &out[0];
         assert_eq!(sent.kind, "internalTransfer");
         assert!(!sent.incoming);
-        assert_eq!(sent.counterparty, "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7");
+        assert_eq!(
+            sent.counterparty,
+            "0x2df1c51e09aecf9cacb7bc98cb1742757f163df7"
+        );
         assert_eq!(sent.amount, 1.0);
 
         let recv = &out[1];
@@ -1292,7 +1429,10 @@ mod tests {
         assert_eq!(recv.token, "FLY");
         assert_eq!(recv.amount, 2000.0);
         assert_eq!(recv.usd, Some(3.408));
-        assert_eq!(recv.counterparty, "0x0168985218db3c45d8271ee48466ed93a5df873a");
+        assert_eq!(
+            recv.counterparty,
+            "0x0168985218db3c45d8271ee48466ed93a5df873a"
+        );
     }
 
     /// Un depósito a vault se cuenta como fondos ENVIADOS al vault, y una
@@ -1307,7 +1447,11 @@ mod tests {
         };
         assert!(!parse_transfer(&ent("vaultDeposit"), me).unwrap().incoming);
         assert!(parse_transfer(&ent("vaultWithdraw"), me).unwrap().incoming);
-        assert!(parse_transfer(&ent("vaultDistribution"), me).unwrap().incoming);
+        assert!(
+            parse_transfer(&ent("vaultDistribution"), me)
+                .unwrap()
+                .incoming
+        );
     }
 
     /// Las direcciones de sistema no son wallets relacionadas. Los casos
@@ -1323,7 +1467,9 @@ mod tests {
             "0x20000000000000000000000000000000000000f1", // FEUSD
             "0x2000000000000000000000000000000000000001", // PURR
             "0x2222222222222222222222222222222222222222", // HYPE nativo
-            "0x2000000000000000000000000000000000000000".to_uppercase().as_str(),
+            "0x2000000000000000000000000000000000000000"
+                .to_uppercase()
+                .as_str(),
         ] {
             assert!(es_direccion_de_sistema(a), "debería ser de sistema: {a}");
         }
@@ -1397,7 +1543,10 @@ mod tests {
         });
         assert_eq!(usdc_avail_after_maint(&v), Some(5.000708));
         // sin el campo (cuenta estándar) o sin token 0: None honesto
-        assert_eq!(usdc_avail_after_maint(&serde_json::json!({"balances": []})), None);
+        assert_eq!(
+            usdc_avail_after_maint(&serde_json::json!({"balances": []})),
+            None
+        );
         let v = serde_json::json!({"tokenToAvailableAfterMaintenance": [[7, "9.0"]]});
         assert_eq!(usdc_avail_after_maint(&v), None);
     }

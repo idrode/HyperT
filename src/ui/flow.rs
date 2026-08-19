@@ -220,8 +220,7 @@ fn draw_positioning(f: &mut Frame, app: &App, area: Rect) {
     let tr = crate::i18n::t();
     let Some(p) = app.selected_pair() else {
         f.render_widget(
-            Paragraph::new(tr.fl_hint_pin)
-                .block(Block::bordered().title(tr.fl_positioning)),
+            Paragraph::new(tr.fl_hint_pin).block(Block::bordered().title(tr.fl_positioning)),
             area,
         );
         return;
@@ -426,14 +425,14 @@ fn score_line(app: &App, coin: &str) -> Line<'static> {
         format!("▲{}", s.bull),
         Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
     ));
-    spans.push(dim(format!(" {}", tr.fl_of_components.replacen("{}", &s.avail.to_string(), 1))));
+    spans.push(dim(format!(
+        " {}",
+        tr.fl_of_components.replacen("{}", &s.avail.to_string(), 1)
+    )));
     if s.bear >= 3 && s.bear > s.bull {
         spans.push(flag(tr.fl_boat_longs.into(), Color::Red));
     } else if s.bull >= 3 && s.bull > s.bear {
-        spans.push(flag(
-            tr.fl_boat_shorts.into(),
-            Color::Green,
-        ));
+        spans.push(flag(tr.fl_boat_shorts.into(), Color::Green));
     }
     Line::from(spans)
 }

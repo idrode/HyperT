@@ -438,7 +438,11 @@ fn draw_form(
                 b.push(format!("${a:.2}"), st_a);
                 // la columna es estrecha (46): etiquetas cortas
                 b.push(
-                    if unified { tr.ex_unified_spot } else { tr.ex_perps },
+                    if unified {
+                        tr.ex_unified_spot
+                    } else {
+                        tr.ex_perps
+                    },
                     dim(),
                 );
                 if req.is_some_and(|req| req > a) {
@@ -525,7 +529,9 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
                 .map(|x| x.meta.max_leverage)
                 .unwrap_or(40);
             // real: la liquidación EXACTA que reporta la API; maqueta: estimada
-            let liq = p.liq.or_else(|| exec::liq_price(p.entry, p.lev, maxl, long));
+            let liq = p
+                .liq
+                .or_else(|| exec::liq_price(p.entry, p.lev, maxl, long));
             let (pnl, roe) = exec::pos_pnl(p, mark).unzip();
             let opt = |v: Option<f64>| v.map(fmt_px).unwrap_or_else(|| "—".into());
             let mut row = Row::new(vec![
@@ -622,7 +628,7 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
         tr.ex_size,
         tr.ex_col_ntl,
     ])
-        .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
     let body: Vec<Row> = st
         .orders
         .iter()

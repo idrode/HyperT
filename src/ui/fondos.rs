@@ -176,10 +176,11 @@ fn draw_spot_strip(f: &mut Frame, app: &App, area: Rect) {
                 ));
             }
             if !s.others.is_empty() {
-                extras.push_str(
-                    &tr.fu_more_spot_tokens
-                        .replacen("{}", &s.others.len().to_string(), 1),
-                );
+                extras.push_str(&tr.fu_more_spot_tokens.replacen(
+                    "{}",
+                    &s.others.len().to_string(),
+                    1,
+                ));
             }
             let detail = if unified {
                 let avail = s
@@ -308,9 +309,7 @@ fn draw_transfer_modal(f: &mut Frame, app: &mut App) {
                     Span::styled(tr.fu_amount_usdc, bold),
                     Span::styled(format!("{buf}█"), cyan),
                 ]),
-                Line::from(dim(
-                    tr.fu_avail_source_side.replacen("{}", &avail_txt, 1),
-                )),
+                Line::from(dim(tr.fu_avail_source_side.replacen("{}", &avail_txt, 1))),
                 match err {
                     Some(e) => Line::from(Span::styled(
                         format!("  ✗ {e}"),
@@ -641,10 +640,11 @@ fn draw_withdraw_modal(f: &mut Frame, app: &mut App) {
                         Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ),
                 ]),
-                Line::from(dim(
-                    tr.fu_wd_withdrawable
-                        .replacen("{}", &format!("{avail:.2}"), 1),
-                )),
+                Line::from(dim(tr.fu_wd_withdrawable.replacen(
+                    "{}",
+                    &format!("{avail:.2}"),
+                    1,
+                ))),
                 Line::from(Span::styled(tr.fu_wd_fee_note, red)),
                 match err {
                     Some(e) => Line::from(Span::styled(
@@ -747,10 +747,11 @@ fn draw_deposit_modal(f: &mut Frame, app: &mut App) {
                         Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ),
                 ]),
-                Line::from(dim(
-                    tr.fu_dep_onchain_avail
-                        .replacen("{}", &format!("{bal:.2}"), 1),
-                )),
+                Line::from(dim(tr.fu_dep_onchain_avail.replacen(
+                    "{}",
+                    &format!("{bal:.2}"),
+                    1,
+                ))),
                 Line::from(Span::styled(tr.fu_dep_min_note, red)),
                 match err {
                     Some(e) => Line::from(Span::styled(
@@ -903,9 +904,11 @@ fn draw_qr(f: &mut Frame, area: Rect, uri: &str, qr: &str, secs_left: u64) {
                 Style::new().fg(Color::Cyan),
             )),
             Line::raw(""),
-            Line::from(dim(
-                tr.fu_qr_expires.replacen("{}", &secs_left.to_string(), 1),
-            )),
+            Line::from(dim(tr.fu_qr_expires.replacen(
+                "{}",
+                &secs_left.to_string(),
+                1,
+            ))),
         ];
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
         return;
@@ -978,7 +981,15 @@ mod tests {
         let (usdc_tx, _usdc) = watch::channel(None);
         let (coin_tx, _coin) = watch::channel(None);
         let (wc_tx, _wc) = mpsc::unbounded_channel();
-        let mut app = App::new(extra_tx, wallet_tx, usdc_tx, coin_tx, wc_tx, "test", Gfx::new());
+        let mut app = App::new(
+            extra_tx,
+            wallet_tx,
+            usdc_tx,
+            coin_tx,
+            wc_tx,
+            "test",
+            Gfx::new(),
+        );
         app.apply_msg(DataMsg::Wc(WcStatus::Connected(WcSession {
             address: "0x000000000000000000000000000000000000dEaD".into(),
             chain: "eip155:42161".into(),
@@ -1026,7 +1037,10 @@ mod tests {
             "falta la dirección checksummed del bridge:\n{s}"
         );
         assert!(s.contains("7.5 USDC"), "falta la cantidad exacta:\n{s}");
-        assert!(s.contains("Sign in MetaMask"), "falta el botón de firma:\n{s}");
+        assert!(
+            s.contains("Sign in MetaMask"),
+            "falta el botón de firma:\n{s}"
+        );
     }
 
     /// El resumen del retiro muestra la dirección de destino EXACTA (la
@@ -1059,8 +1073,14 @@ mod tests {
             "falta la dirección de destino (la maestra):\n{s}"
         );
         assert!(s.contains("9 USDC"), "falta el neto tras la comisión:\n{s}");
-        assert!(s.contains("Signature request"), "falta el aviso gasless:\n{s}");
-        assert!(s.contains("Sign in MetaMask"), "falta el botón de firma:\n{s}");
+        assert!(
+            s.contains("Signature request"),
+            "falta el aviso gasless:\n{s}"
+        );
+        assert!(
+            s.contains("Sign in MetaMask"),
+            "falta el botón de firma:\n{s}"
+        );
 
         // y las fases del retiro se pintan en su tira
         app.withdraw_ui = None;
@@ -1120,7 +1140,10 @@ mod tests {
             s.contains("ApproveAgent"),
             "falta el nombre del typed data a comparar en MetaMask:\n{s}"
         );
-        assert!(s.contains("Sign in MetaMask"), "falta el botón de firma:\n{s}");
+        assert!(
+            s.contains("Sign in MetaMask"),
+            "falta el botón de firma:\n{s}"
+        );
 
         // fases en la tira: verificado con su ruta
         app.agent_ui = None;
@@ -1168,10 +1191,7 @@ mod tests {
             s.contains("SPOT USDC inside Hyperliquid"),
             "falta el bloque de saldo spot:\n{s}"
         );
-        assert!(
-            s.contains("999.00 USDC"),
-            "falta la cantidad spot:\n{s}"
-        );
+        assert!(s.contains("999.00 USDC"), "falta la cantidad spot:\n{s}");
         assert!(
             s.contains("PERPS balance inside Hyperliquid"),
             "falta el bloque de perps renombrado:\n{s}"
@@ -1321,10 +1341,20 @@ mod tests {
         let (usdc_tx, _usdc) = tokio::sync::watch::channel(None);
         let (coin_tx, _coin) = tokio::sync::watch::channel(None);
         let (wc_tx, _wc) = mpsc::unbounded_channel();
-        let mut app = App::new(extra_tx, wallet_tx, usdc_tx, coin_tx, wc_tx, "testnet", Gfx::new());
+        let mut app = App::new(
+            extra_tx,
+            wallet_tx,
+            usdc_tx,
+            coin_tx,
+            wc_tx,
+            "testnet",
+            Gfx::new(),
+        );
         let (trade_tx, _trade_rx) = mpsc::unbounded_channel();
         app.arm_trading(
-            "0x000000000000000000000000000000000000dEaD".parse().unwrap(),
+            "0x000000000000000000000000000000000000dEaD"
+                .parse()
+                .unwrap(),
             "0xAGENTEagenteAGENTEagente".into(),
             trade_tx,
         );
@@ -1394,7 +1424,10 @@ mod tests {
             err: None,
         });
         let s = pantalla(&mut app);
-        assert!(s.contains("minimum 5 USDC"), "falta el aviso del mínimo:\n{s}");
+        assert!(
+            s.contains("minimum 5 USDC"),
+            "falta el aviso del mínimo:\n{s}"
+        );
 
         app.deposit_ui = None;
         app.deposit = Some(DepositStatus::Confirmed {

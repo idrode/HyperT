@@ -134,6 +134,30 @@ pub struct PosInfo {
     pub since_open_funding: f64,
 }
 
+/// Cómo se ha averiguado la apertura del tramo actual de una posición, de más
+/// a menos firme. La UI lo refleja para no vender una estimación como un dato
+/// exacto (ver `src/data/opens.rs` para el detalle de cada vía).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenKind {
+    /// Fill con cruce por cero (o flip de lado) localizado en el historial:
+    /// dato exacto al segundo.
+    Exact,
+    /// Reconstruida acumulando `userFunding` hacia atrás hasta agotar el
+    /// `cumFunding.sinceOpen` de la posición: precisión del evento de funding
+    /// (horas), no del fill.
+    Funding,
+    /// No se ha podido determinar: es solo una cota inferior (la posición se
+    /// abrió ESE instante o antes).
+    LowerBound,
+}
+
+/// Apertura estimada del tramo actual de una posición abierta.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenEst {
+    pub ms: u64,
+    pub kind: OpenKind,
+}
+
 /// Un fill del historial de operaciones de una cuenta (`userFills`). Solo
 /// lectura de datos públicos, para la Vista 9 (win rate, PnL realizado,
 /// operaciones cerradas). La API devuelve una lista plana, más reciente
@@ -308,7 +332,17 @@ pub enum DataMsg {
     /// Estado de la dirección observada en la vista wallet.
     WalletState(AccountSnapshot),
     /// Historial de fills (`userFills`) de una dirección observada (Vista 9).
-    WalletFills { addr: String, fills: Vec<FillInfo> },
+    WalletFills {
+        addr: String,
+        fills: Vec<FillInfo>,
+    },
+    /// Aperturas reconstruidas de las posiciones abiertas de una dirección
+    /// observada (Vista 9), por par. Llega tarde y a su ritmo: reconstruirlas
+    /// cuesta decenas de peticiones (ver `opens::resolve`).
+    WalletOpens {
+        addr: String,
+        opens: std::collections::HashMap<String, OpenEst>,
+    },
     /// Transferencias con contraparte (`userNonFundingLedgerUpdates`) de una
     /// dirección observada — wallets relacionadas de la Vista 9.
     WalletTransfers {
@@ -319,9 +353,15 @@ pub enum DataMsg {
     SpotState(SpotSnapshot),
     /// Modo de cuenta (`userAbstraction`) de la maestra WC — decide si el
     /// margen operable sale de spot (unificada) o de perps (estándar).
-    AccountMode { addr: String, mode: AccountMode },
+    AccountMode {
+        addr: String,
+        mode: AccountMode,
+    },
     /// Órdenes abiertas REALES de la cuenta de trading (frontendOpenOrders).
-    OpenOrders { addr: String, orders: Vec<LiveOrd> },
+    OpenOrders {
+        addr: String,
+        orders: Vec<LiveOrd>,
+    },
     /// Fase/resultado de una acción real del panel de ejecución (trader).
     Exec(crate::trader::ExecEvent),
     /// Saldo USDC on-chain (wallet en Arbitrum) de la cuenta maestra WC —

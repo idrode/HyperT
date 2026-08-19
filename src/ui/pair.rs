@@ -21,8 +21,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(p) = app.selected_coin.as_deref().and_then(|c| app.pairs.get(c)) else {
         let s = crate::i18n::t();
         f.render_widget(
-            Paragraph::new(s.pr_select_pair)
-                .block(Block::bordered().title(s.pr_word_pair)),
+            Paragraph::new(s.pr_select_pair).block(Block::bordered().title(s.pr_word_pair)),
             area,
         );
         return;
@@ -79,7 +78,13 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let bottom =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[2]);
     let oi_series: Vec<f64> = p.hist.iter().map(|h| h.oi).collect();
-    draw_spark(f, crate::i18n::t().pr_spark_oi, &oi_series, Color::Yellow, bottom[0]);
+    draw_spark(
+        f,
+        crate::i18n::t().pr_spark_oi,
+        &oi_series,
+        Color::Yellow,
+        bottom[0],
+    );
     let mid_series: Vec<f64> = p.mid_hist.iter().map(|(_, m)| *m).collect();
     draw_spark(
         f,
@@ -203,9 +208,8 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
     lines.push(ta_line);
 
     f.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered().title(format!(" {}{}", p.meta.name, tr.pr_perp)),
-        ),
+        Paragraph::new(lines)
+            .block(Block::bordered().title(format!(" {}{}", p.meta.name, tr.pr_perp))),
         area,
     );
 }
@@ -396,12 +400,18 @@ fn draw_ta_panel(
     ]);
     let mut block = Block::bordered().title(title);
     let Some(e) = &p.extra else {
-        f.render_widget(Paragraph::new(crate::i18n::t().t_loading_candles).block(block), area);
+        f.render_widget(
+            Paragraph::new(crate::i18n::t().t_loading_candles).block(block),
+            area,
+        );
         return;
     };
     let n = e.candles.len();
     if n < 2 {
-        f.render_widget(Paragraph::new(crate::i18n::t().t_no_candles).block(block), area);
+        f.render_widget(
+            Paragraph::new(crate::i18n::t().t_no_candles).block(block),
+            area,
+        );
         return;
     }
     let inner = block.inner(area);
@@ -563,7 +573,12 @@ fn draw_delta_panel(
         let txt = match vals[i] {
             Some(v) => {
                 let sign = if v >= 0.0 { "+" } else { "-" };
-                format!(" {} · Δ {}{} ", time_label(vis[i].t_close), sign, fmt_usd(v.abs()))
+                format!(
+                    " {} · Δ {}{} ",
+                    time_label(vis[i].t_close),
+                    sign,
+                    fmt_usd(v.abs())
+                )
             }
             None => format!(" {}{}", time_label(vis[i].t_close), tr.pr_no_trades),
         };
@@ -580,10 +595,7 @@ fn draw_delta_panel(
     oscimg::draw_delta_into(f, chart, gfx, key, spec);
 
     // eje compacto: mayor delta absoluto visible como referencia de escala
-    let max = vals
-        .iter()
-        .flatten()
-        .fold(0.0_f64, |m, v| m.max(v.abs()));
+    let max = vals.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
     let h = axis.height as usize;
     if h >= 2 && max > 0.0 {
         let mut labels: Vec<Line> = vec![Line::raw(""); h];

@@ -10,12 +10,12 @@ use tokio::sync::{mpsc, watch};
 
 use crate::data::types::{
     AccountMode, AccountSnapshot, CandlePoint, CtxSnapshot, DataMsg, ExtraReq, FillInfo, Interval,
-    LiveOrd, PairMeta, PosInfo, SpotSnapshot, TransferInfo, WhaleInfo,
+    LiveOrd, OpenEst, OpenKind, PairMeta, PosInfo, SpotSnapshot, TransferInfo, WhaleInfo,
 };
 use crate::exec::{self, Confirm, ExecState, Focus, Hit, SlTpEdit};
-use crate::trader::{ExecEvent, TraderCmd};
 use crate::liqdens::LiqBar;
 use crate::signals::{self, Dmi, Regime};
+use crate::trader::{ExecEvent, TraderCmd};
 use crate::ui::fmt::fmt_px;
 use crate::ui::oscimg::Gfx;
 use crate::wallet::walletconnect::{
@@ -185,27 +185,26 @@ pub const FRESH_POS_MS: u64 = 24 * 60 * 60 * 1000;
 /// `None` si no se conoce. Puro para poder testearlo sin snapshot real.
 pub fn wallet_pos_order(
     positions: &[PosInfo],
-    opens: &[Option<(u64, bool)>],
+    opens: &[Option<OpenEst>],
     sort: WalletSort,
 ) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..positions.len()).collect();
     if sort == WalletSort::Api {
         return idx;
     }
-    // Clave descendente en dos niveles: `rank` separa la calidad del dato (2 =
-    // apertura exacta, 1 = solo cota inferior `≥`, 0 = sin dato) para que una
-    // estimación nunca se cuele por delante de un dato firme, y `val` ordena
-    // dentro de cada nivel. Sin dato siempre al final, nunca tratado como 0.
+    // Clave descendente en dos niveles: `rank` separa la calidad del dato para
+    // que una cota inferior nunca se cuele por delante de una apertura sabida,
+    // y `val` ordena dentro de cada nivel. Sin dato siempre al final, nunca
+    // tratado como 0.
     let key = |i: usize| -> (u8, f64) {
         match sort {
             WalletSort::Api => (0, 0.0),
             WalletSort::Age => match opens.get(i).copied().flatten() {
-                Some((t, true)) => (2, t as f64),
-                Some((t, false)) => (1, t as f64),
+                Some(o) => (rank(o.kind), o.ms as f64),
                 None => (0, 0.0),
             },
-            WalletSort::Notional => (2, positions[i].position_value.abs()),
-            WalletSort::Roe => (2, positions[i].roe),
+            WalletSort::Notional => (3, positions[i].position_value.abs()),
+            WalletSort::Roe => (3, positions[i].roe),
         }
     };
     idx.sort_by(|&a, &b| {
@@ -216,6 +215,15 @@ pub fn wallet_pos_order(
             .then(a.cmp(&b))
     });
     idx
+}
+
+/// Calidad del dato de apertura, de más a menos firme (0 = no hay dato).
+pub fn rank(k: OpenKind) -> u8 {
+    match k {
+        OpenKind::Exact => 3,
+        OpenKind::Funding => 2,
+        OpenKind::LowerBound => 1,
+    }
 }
 
 /// CVD del par seleccionado (canal `trades`). El acumulado solo tiene sentido
@@ -340,10 +348,7 @@ impl DeltaState {
     /// Clave de caché del raster: cambia al llegar trades nuevos (por segundo),
     /// al cambiar de TF o al desplazarse la ventana visible.
     pub fn raster_key(&self, iv_ms: u64, start: usize, len: usize) -> u64 {
-        self.last_secs
-            ^ iv_ms.rotate_left(17)
-            ^ ((start as u64) << 40)
-            ^ ((len as u64) << 20)
+        self.last_secs ^ iv_ms.rotate_left(17) ^ ((start as u64) << 40) ^ ((len as u64) << 20)
     }
 }
 
@@ -689,9 +694,7 @@ pub enum View {
 
 /// ¿Cae (col,row) dentro del Rect, si existe?
 fn hit(area: Option<Rect>, col: u16, row: u16) -> bool {
-    area.is_some_and(|a| {
-        col >= a.x && col < a.x + a.width && row >= a.y && row < a.y + a.height
-    })
+    area.is_some_and(|a| col >= a.x && col < a.x + a.width && row >= a.y && row < a.y + a.height)
 }
 
 /// Copia `text` al portapapeles del sistema vía OSC 52 (soportado por
@@ -891,6 +894,9 @@ pub struct App {
     /// operaciones cerradas.
     pub wallet_fills: Vec<FillInfo>,
     pub wallet_fills_at: Option<Instant>,
+    /// Aperturas reconstruidas por `data::opens` (fills paginados + funding),
+    /// por par. Llegan más tarde que el resto: son decenas de peticiones.
+    pub wallet_opens: std::collections::HashMap<String, OpenEst>,
     /// Transferencias con contraparte (`userNonFundingLedgerUpdates`) de la
     /// dirección observada, más reciente primero: wallets relacionadas.
     pub wallet_transfers: Vec<TransferInfo>,
@@ -1062,6 +1068,7 @@ impl App {
             wallet_target: None,
             wallet_fills: Vec::new(),
             wallet_fills_at: None,
+            wallet_opens: std::collections::HashMap::new(),
             wallet_transfers: Vec::new(),
             wallet_transfers_at: None,
             wallet_focus: WalletFocus::Positions,
@@ -1310,6 +1317,12 @@ impl App {
                     self.wallet_fills_at = Some(Instant::now());
                 }
             }
+            DataMsg::WalletOpens { addr, opens } => {
+                // mismo criterio que los fills: solo la watch-only actual
+                if self.wallet_addr.as_deref() == Some(addr.as_str()) {
+                    self.wallet_opens = opens;
+                }
+            }
             DataMsg::WalletTransfers { addr, transfers } => {
                 // mismo criterio que los fills: solo la watch-only actual
                 if self.wallet_addr.as_deref() == Some(addr.as_str()) {
@@ -1380,7 +1393,11 @@ impl App {
         let mut flat: Vec<(&str, f64)> = self
             .whales
             .iter()
-            .flat_map(|w| w.positions.iter().map(move |p| (w.addr.as_str(), p.position_value)))
+            .flat_map(|w| {
+                w.positions
+                    .iter()
+                    .map(move |p| (w.addr.as_str(), p.position_value))
+            })
             .collect();
         flat.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         flat.get(idx).map(|(a, _)| a.to_string())
@@ -1400,24 +1417,37 @@ impl App {
         self.wallet_sel = (self.wallet_sel as i64 + delta).clamp(0, n as i64 - 1) as usize;
     }
 
-    /// Apertura de cada posición abierta `(ms, exacta)`, en el orden en que las
-    /// devuelve `clearinghouseState`. Reusa la misma heurística sobre
-    /// `userFills` que ya usa el modal de detalle: `exacta=false` es una cota
-    /// inferior (la posición se abrió ESE día o antes) — sirve para ordenar,
-    /// pero no para afirmar que se abrió hace menos de 24h. `None` si el par no
-    /// aparece en el historial disponible.
+    /// Apertura de cada posición abierta, en el orden en que las devuelve
+    /// `clearinghouseState`. Prefiere lo que haya reconstruido `data::opens`
+    /// (fills paginados + funding, llega con retraso) y, mientras tanto, cae a
+    /// la heurística local sobre los `userFills` ya cargados.
     ///
-    /// Ojo con lo estrecha que puede ser esa ventana: `userFills` corta en
-    /// ~2000 fills, que en una cuenta muy activa son minutos, no días
-    /// (verificado en una whale real: 2000 fills = 100 minutos). Por eso la
-    /// mayoría de posiciones de una whale no tendrán apertura exacta.
-    pub fn wallet_pos_opens(&self) -> Vec<Option<(u64, bool)>> {
+    /// Ojo con lo estrecha que puede ser esa ventana local: `userFills` corta
+    /// en ~2000 fills, que en una cuenta muy activa son minutos, no días
+    /// (medido en una whale real: 2000 fills = 100 minutos). Por eso el
+    /// resolver de fondo existe.
+    pub fn wallet_pos_opens(&self) -> Vec<Option<OpenEst>> {
         let empty = Vec::new();
         let positions = self.wallet.as_ref().map(|w| &w.positions).unwrap_or(&empty);
         positions
             .iter()
             .map(|p| {
-                crate::ui::wallet::position_open_time(&self.wallet_fills, &p.coin, p.szi)
+                let local =
+                    crate::ui::wallet::position_open_time(&self.wallet_fills, &p.coin, p.szi).map(
+                        |(ms, exact)| OpenEst {
+                            ms,
+                            kind: if exact {
+                                OpenKind::Exact
+                            } else {
+                                OpenKind::LowerBound
+                            },
+                        },
+                    );
+                match (self.wallet_opens.get(&p.coin).copied(), local) {
+                    // un exacto local gana a una cota del resolver (y viceversa)
+                    (Some(r), Some(l)) => Some(if rank(l.kind) > rank(r.kind) { l } else { r }),
+                    (r, l) => r.or(l),
+                }
             })
             .collect()
     }
@@ -1446,11 +1476,17 @@ impl App {
     /// Transferencias recibidas / enviadas de la dirección observada, más
     /// reciente primero (el orden en el que llegan del ledger).
     pub fn wallet_in(&self) -> Vec<&TransferInfo> {
-        self.wallet_transfers.iter().filter(|t| t.incoming).collect()
+        self.wallet_transfers
+            .iter()
+            .filter(|t| t.incoming)
+            .collect()
     }
 
     pub fn wallet_out(&self) -> Vec<&TransferInfo> {
-        self.wallet_transfers.iter().filter(|t| !t.incoming).collect()
+        self.wallet_transfers
+            .iter()
+            .filter(|t| !t.incoming)
+            .collect()
     }
 
     fn clamp_wallet_transfer_sel(&mut self) {
@@ -1464,8 +1500,14 @@ impl App {
     fn move_wallet_focus_sel(&mut self, delta: i64) {
         let (sel, n) = match self.wallet_focus {
             WalletFocus::Positions => return self.move_wallet_sel(delta),
-            WalletFocus::In => (&mut self.wallet_in_sel, self.wallet_transfers.iter().filter(|t| t.incoming).count()),
-            WalletFocus::Out => (&mut self.wallet_out_sel, self.wallet_transfers.iter().filter(|t| !t.incoming).count()),
+            WalletFocus::In => (
+                &mut self.wallet_in_sel,
+                self.wallet_transfers.iter().filter(|t| t.incoming).count(),
+            ),
+            WalletFocus::Out => (
+                &mut self.wallet_out_sel,
+                self.wallet_transfers.iter().filter(|t| !t.incoming).count(),
+            ),
         };
         if n == 0 {
             *sel = 0;
@@ -1523,6 +1565,7 @@ impl App {
         self.wallet_at = None;
         self.wallet_fills = Vec::new();
         self.wallet_fills_at = None;
+        self.wallet_opens.clear();
         self.wallet_transfers = Vec::new();
         self.wallet_transfers_at = None;
         self.wallet_sel = 0;
@@ -2008,6 +2051,9 @@ impl App {
     }
 
     /// Reenvía al watcher la lista de cuentas a observar (watch-only + maestra).
+    /// Orden significativo: la watch-only de la Vista 9 va SIEMPRE primero —
+    /// `data::wallet_watcher` se apoya en ello para reconstruir aperturas solo
+    /// para ella (es un barrido caro y la Vista 8 no las muestra).
     fn push_wallet_targets(&self) {
         let mut targets: Vec<Address> = self.wallet_target.into_iter().collect();
         if let Some(a) = self.funds_target {
@@ -2130,10 +2176,7 @@ impl App {
                 .parse::<Address>()
                 .ok()
                 .map(|a| (a, s.chain.clone())),
-            _ => self
-                .trade
-                .as_ref()
-                .map(|t| (t.master, self.net_chain())),
+            _ => self.trade.as_ref().map(|t| (t.master, self.net_chain())),
         };
         let target = session.as_ref().map(|(a, _)| *a);
         if target != self.funds_target {
@@ -2449,9 +2492,9 @@ impl App {
             Some(units) if units <= crate::data::WITHDRAW_FEE_UNITS => {
                 Err("la comisión es 1 USDC — retira más de 1 para recibir algo".to_string())
             }
-            Some(units) if units > (avail * 1e6).floor() as u128 => {
-                Err(format!("excede el retirable: hay {avail:.2} USDC withdrawable"))
-            }
+            Some(units) if units > (avail * 1e6).floor() as u128 => Err(format!(
+                "excede el retirable: hay {avail:.2} USDC withdrawable"
+            )),
             Some(units) => Ok(units),
         };
         match outcome {
@@ -2621,9 +2664,9 @@ impl App {
                     "saldo {} aún sin leer — espera unos segundos",
                     if to_perp { "spot" } else { "de perps" }
                 )),
-                Some(a) if units > (a * 1e6).floor() as u128 => Err(format!(
-                    "excede el disponible del lado origen: {a:.2} USDC"
-                )),
+                Some(a) if units > (a * 1e6).floor() as u128 => {
+                    Err(format!("excede el disponible del lado origen: {a:.2} USDC"))
+                }
                 Some(_) => Ok(units),
             },
         };
@@ -3697,7 +3740,12 @@ mod tests {
         let iv = 60_000;
         let cl = |k: u64| m(k) + iv - 1;
         // una vela previa al tracking sale None; las tres con datos suman su min
-        let cands = [candle(m(0) - 1), candle(cl(0)), candle(cl(1)), candle(cl(2))];
+        let cands = [
+            candle(m(0) - 1),
+            candle(cl(0)),
+            candle(cl(1)),
+            candle(cl(2)),
+        ];
         let out = d.per_candle(&cands, iv);
         assert_eq!(out[0], None);
         assert_eq!(out[1], Some(200.0));
@@ -3728,7 +3776,15 @@ mod tests {
         let (usdc_tx, usdc_rx) = watch::channel(None);
         let (coin_tx, _coin) = watch::channel(None);
         let (wc_tx, wc_rx) = mpsc::unbounded_channel();
-        let app = App::new(extra_tx, wallet_tx, usdc_tx, coin_tx, wc_tx, "test", Gfx::new());
+        let app = App::new(
+            extra_tx,
+            wallet_tx,
+            usdc_tx,
+            coin_tx,
+            wc_tx,
+            "test",
+            Gfx::new(),
+        );
         (app, wallet_rx, usdc_rx, wc_rx)
     }
 
@@ -3876,7 +3932,10 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             app.deposit_ui,
-            Some(DepositUi::Confirm { units: 7_500_000, .. })
+            Some(DepositUi::Confirm {
+                units: 7_500_000,
+                ..
+            })
         ));
         press(&mut app, KeyCode::Char('y'));
         assert!(app.deposit_ui.is_none());
@@ -3943,7 +4002,10 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             app.withdraw_ui,
-            Some(WithdrawUi::Confirm { units: 10_000_000, .. })
+            Some(WithdrawUi::Confirm {
+                units: 10_000_000,
+                ..
+            })
         ));
         press(&mut app, KeyCode::Char('y'));
         assert!(app.withdraw_ui.is_none());
@@ -4029,7 +4091,10 @@ mod tests {
 
         press(&mut app, KeyCode::Char('y'));
         assert!(app.agent_ui.is_none());
-        assert!(matches!(app.agent, Some(AgentStatus::AwaitingWallet { .. })));
+        assert!(matches!(
+            app.agent,
+            Some(AgentStatus::AwaitingWallet { .. })
+        ));
         match wc_rx.try_recv().expect("debe salir un WcCmd::ApproveAgent") {
             WcCmd::ApproveAgent(req) => {
                 assert_eq!(req.agent_address, ui2.agent_addr);
@@ -4120,7 +4185,10 @@ mod tests {
             app.transfer,
             Some(TransferStatus::AwaitingWallet { to_perp: true, .. })
         ));
-        match wc_rx.try_recv().expect("debe salir un WcCmd::ClassTransfer") {
+        match wc_rx
+            .try_recv()
+            .expect("debe salir un WcCmd::ClassTransfer")
+        {
             WcCmd::ClassTransfer(req) => {
                 assert_eq!(req.units, 10_000_000);
                 assert_eq!(req.amount, "10");
@@ -4162,7 +4230,10 @@ mod tests {
         }
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Char('y'));
-        match wc_rx.try_recv().expect("debe salir un WcCmd::ClassTransfer") {
+        match wc_rx
+            .try_recv()
+            .expect("debe salir un WcCmd::ClassTransfer")
+        {
             WcCmd::ClassTransfer(req) => {
                 assert!(!req.to_perp);
                 assert_eq!(req.amount, "20");
@@ -4395,7 +4466,10 @@ mod tests {
         let friend_fmt = format!("{}", FRIEND.parse::<Address>().unwrap());
         assert_eq!(app.wallet_addr.as_deref(), Some(friend_fmt.as_str()));
         assert!(app.wallet_addr_modal.is_none());
-        assert!(app.wallet_transfers.is_empty(), "datos de la anterior fuera");
+        assert!(
+            app.wallet_transfers.is_empty(),
+            "datos de la anterior fuera"
+        );
         assert!(app.wallet_transfers_at.is_none());
         assert!(app.wallet_fills_at.is_none());
         assert_eq!(app.wallet_focus, WalletFocus::Positions);
@@ -4433,7 +4507,10 @@ mod tests {
             addr: "0xotra".into(),
             mode: AccountMode::Unified,
         });
-        assert!(app.account_mode.is_none(), "modo de otra dirección no entra");
+        assert!(
+            app.account_mode.is_none(),
+            "modo de otra dirección no entra"
+        );
     }
 
     // ── panel de ejecución REAL (paso 7) ───────────────────────────────────
@@ -4546,7 +4623,11 @@ mod tests {
             }
             other => panic!("comando inesperado: {other:?}"),
         }
-        assert_eq!(app.exec.orders.len(), 2, "la fila la quita el refresh, no el click");
+        assert_eq!(
+            app.exec.orders.len(),
+            2,
+            "la fila la quita el refresh, no el click"
+        );
 
         // cerrar la posición → confirmación explícita → Close con szi y mid
         app.exec.focus = Focus::Pos(0);
@@ -4567,7 +4648,11 @@ mod tests {
             }
             other => panic!("comando inesperado: {other:?}"),
         }
-        assert_eq!(app.exec.positions.len(), 1, "la posición la quita el refresh");
+        assert_eq!(
+            app.exec.positions.len(),
+            1,
+            "la posición la quita el refresh"
+        );
 
         // SL/TP nuevos → SetTriggers cancelando el trigger anterior (oid 11)
         app.exec_sltp_real(0, Some(94_000.0), Some(120_000.0));
@@ -4590,7 +4675,9 @@ mod tests {
         }
 
         // los eventos del trader aterrizan en la línea de estado
-        app.apply_msg(DataMsg::Exec(ExecEvent::Failed("Order must have minimum value of $10.".into())));
+        app.apply_msg(DataMsg::Exec(ExecEvent::Failed(
+            "Order must have minimum value of $10.".into(),
+        )));
         assert!(app.exec.err.as_deref().unwrap().contains("minimum value"));
     }
 
@@ -4610,7 +4697,12 @@ mod tests {
         app.exec.lev = 5;
         app.exec_submit();
         assert!(app.exec.confirm.is_none());
-        assert!(app.exec.err.as_deref().unwrap().contains("margen insuficiente"));
+        assert!(app
+            .exec
+            .err
+            .as_deref()
+            .unwrap()
+            .contains("margen insuficiente"));
 
         // por debajo de $10 notional: rechazo del draft (regla real)
         app.exec.size = "5".into();
@@ -4695,7 +4787,10 @@ mod tests {
         press(&mut app, KeyCode::Char('y'));
         press(&mut app, KeyCode::Enter);
         app.exec_confirm_yes(); // camino del click en ConfirmYes
-        assert!(trader_rx.try_recv().is_err(), "no debe salir ningún comando");
+        assert!(
+            trader_rx.try_recv().is_err(),
+            "no debe salir ningún comando"
+        );
         assert!(app.exec.confirm.is_some(), "el modal sigue abierto");
 
         // teclear la frase (minúsculas: se normaliza) + Enter → Open real.
@@ -4705,10 +4800,7 @@ mod tests {
             press(&mut app, KeyCode::Char(ch));
         }
         press(&mut app, KeyCode::Enter);
-        assert!(matches!(
-            trader_rx.try_recv(),
-            Ok(TraderCmd::Open { .. })
-        ));
+        assert!(matches!(trader_rx.try_recv(), Ok(TraderCmd::Open { .. })));
         assert!(app.exec.confirm.is_none());
         assert!(app.exec.confirm_phrase.is_none());
 
@@ -4746,22 +4838,47 @@ mod tests {
             pos("ETH", -2.0, 900.0, -0.05),
             pos("SOL", 3.0, 500.0, 0.40),
         ];
-        let opens = vec![Some((1_000, true)), None, Some((9_000, true))];
+        let ex = |ms| {
+            Some(OpenEst {
+                ms,
+                kind: OpenKind::Exact,
+            })
+        };
+        let opens = vec![ex(1_000), None, ex(9_000)];
 
-        assert_eq!(wallet_pos_order(&ps, &opens, WalletSort::Api), vec![0, 1, 2]);
+        assert_eq!(
+            wallet_pos_order(&ps, &opens, WalletSort::Api),
+            vec![0, 1, 2]
+        );
         // más reciente primero; ETH (sin apertura conocida) al final
-        assert_eq!(wallet_pos_order(&ps, &opens, WalletSort::Age), vec![2, 0, 1]);
+        assert_eq!(
+            wallet_pos_order(&ps, &opens, WalletSort::Age),
+            vec![2, 0, 1]
+        );
 
         // una cota inferior (`≥`, apertura fuera de la ventana de fills) ordena
-        // pero NUNCA por delante de un dato exacto, por reciente que parezca:
+        // pero NUNCA por delante de una apertura sabida, por reciente que sea:
         // SOL (cota de hace nada) queda detrás de BTC (exacta y más antigua).
-        let mixtas = vec![Some((1_000, true)), None, Some((9_000, false))];
-        assert_eq!(wallet_pos_order(&ps, &mixtas, WalletSort::Age), vec![0, 2, 1]);
+        let mixtas = vec![
+            ex(1_000),
+            None,
+            Some(OpenEst {
+                ms: 9_000,
+                kind: OpenKind::LowerBound,
+            }),
+        ];
+        assert_eq!(
+            wallet_pos_order(&ps, &mixtas, WalletSort::Age),
+            vec![0, 2, 1]
+        );
         assert_eq!(
             wallet_pos_order(&ps, &opens, WalletSort::Notional),
             vec![1, 2, 0]
         );
-        assert_eq!(wallet_pos_order(&ps, &opens, WalletSort::Roe), vec![2, 0, 1]);
+        assert_eq!(
+            wallet_pos_order(&ps, &opens, WalletSort::Roe),
+            vec![2, 0, 1]
+        );
     }
 
     /// `s` cicla el orden en Vista 9 (mismo patrón que Ranking/Flujo) y el modal

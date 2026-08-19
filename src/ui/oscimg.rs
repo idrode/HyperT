@@ -233,13 +233,7 @@ pub(super) struct DeltaSpec<'a> {
 }
 
 /// Rasteriza (solo si cambió `key` o el tamaño) y pinta la barra de delta.
-pub(super) fn draw_delta_into(
-    f: &mut Frame,
-    area: Rect,
-    gfx: &mut Gfx,
-    key: u64,
-    spec: DeltaSpec,
-) {
+pub(super) fn draw_delta_into(f: &mut Frame, area: Rect, gfx: &mut Gfx, key: u64, spec: DeltaSpec) {
     if gfx.blank_once {
         f.render_widget(ratatui::widgets::Clear, area);
         return;

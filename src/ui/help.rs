@@ -4,7 +4,11 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::i18n::{self, HelpRow};
 
 pub fn draw(f: &mut Frame) {
-    let area = centered(72, 48, f.area());
+    // alto pedido = todas las filas + bordes (`centered` lo recorta al alto real
+    // del terminal); con 48 fijas la ayuda se cortaba por abajo y las secciones
+    // de Fondos/Flujo no llegaban a verse nunca.
+    let h = i18n::help_rows().len() as u16 + 2;
+    let area = centered(72, h, f.area());
     f.render_widget(Clear, area);
 
     let key = |k: &str, desc: &str| {

@@ -34,7 +34,11 @@ pub fn lang() -> Lang {
 
 /// Alterna En ↔ Es (tecla `L`).
 pub fn toggle_lang() {
-    let next = if lang() == Lang::En { Lang::Es } else { Lang::En };
+    let next = if lang() == Lang::En {
+        Lang::Es
+    } else {
+        Lang::En
+    };
     set_lang(next);
 }
 
@@ -1435,7 +1439,10 @@ static HELP_EN: &[HelpRow] = &[
     HelpRow::Key("Enter", "open pair view"),
     HelpRow::Key("s", "cycle sort column"),
     HelpRow::Key("r", "reverse sort"),
-    HelpRow::Key("/", "search pair (live filter · Enter goes to pair · Esc cancels)"),
+    HelpRow::Key(
+        "/",
+        "search pair (live filter · Enter goes to pair · Esc cancels)",
+    ),
     HelpRow::Blank,
     HelpRow::Section(" Pair and W+RSI"),
     HelpRow::Key("←→ / h l", "previous / next pair"),
@@ -1451,30 +1458,42 @@ static HELP_EN: &[HelpRow] = &[
     HelpRow::Key("↑↓ / j k", "scroll positions (whales)"),
     HelpRow::Key("Enter/click", "show full whale address · c copies (whales)"),
     HelpRow::Key("e", "enter address to watch (wallet)"),
-    HelpRow::Key("↑↓ · Enter", "navigate positions · open+funding detail (wallet)"),
+    HelpRow::Key(
+        "↑↓ · Enter",
+        "navigate positions · open+funding detail (wallet)",
+    ),
     HelpRow::Key(
         "Tab · Enter",
         "switch to the related-wallet lists · open that address (Enter there watches it)",
     ),
     HelpRow::Key("Backspace", "go back to the previously watched wallet"),
-    HelpRow::Key(
-        "s",
-        "cycle position order: as reported → newest → notional → ROE% (wallet)",
-    ),
-    HelpRow::Key(
-        "Open col.",
-        "position age · ≥ = lower bound (older than the fills window) · • = opened <24h",
-    ),
+    HelpRow::Key("s", "cycle position order (as-is/newest/notional/ROE%)"),
+    HelpRow::Key("Open", "age: exact · ≈ from funding · ≥ lower bound"),
     HelpRow::Key("r", "price range ±5/15/30% (liqs)"),
     HelpRow::Blank,
     HelpRow::Section(" Funds (real balance · REAL execution on testnet with agent)"),
     HelpRow::Key("c / d", "connect / disconnect MetaMask (WalletConnect QR)"),
-    HelpRow::Key("p", "deposit USDC to bridge (REAL · min 5 USDC · double confirm)"),
-    HelpRow::Key("w", "withdraw USDC to your wallet (REAL · $1 fee · gasless EIP-712)"),
-    HelpRow::Key("a", "authorize agent wallet (one signature · trade-only · local key)"),
-    HelpRow::Key("t", "transfer USDC spot ⇄ perps (non-unified account only · gasless)"),
+    HelpRow::Key(
+        "p",
+        "deposit USDC to bridge (REAL · min 5 USDC · double confirm)",
+    ),
+    HelpRow::Key(
+        "w",
+        "withdraw USDC to your wallet (REAL · $1 fee · gasless EIP-712)",
+    ),
+    HelpRow::Key(
+        "a",
+        "authorize agent wallet (one signature · trade-only · local key)",
+    ),
+    HelpRow::Key(
+        "t",
+        "transfer USDC spot ⇄ perps (non-unified account only · gasless)",
+    ),
     HelpRow::Key("↑↓ / j k", "move focus: form → positions → orders"),
-    HelpRow::Key("←→ / h l", "adjust field (pair, side, leverage, type, unit)"),
+    HelpRow::Key(
+        "←→ / h l",
+        "adjust field (pair, side, leverage, type, unit)",
+    ),
     HelpRow::Key("Enter", "edit field · review order · position SL/TP"),
     HelpRow::Key("x / e", "close position or cancel order / edit SL/TP"),
     HelpRow::Key("mouse", "click fields/buttons · draggable leverage slider"),
@@ -1505,7 +1524,10 @@ static HELP_ES: &[HelpRow] = &[
     HelpRow::Key("Enter", "abrir vista de par"),
     HelpRow::Key("s", "ciclar columna de orden"),
     HelpRow::Key("r", "invertir orden"),
-    HelpRow::Key("/", "buscar par (filtra en vivo · Enter va al par · Esc cancela)"),
+    HelpRow::Key(
+        "/",
+        "buscar par (filtra en vivo · Enter va al par · Esc cancela)",
+    ),
     HelpRow::Blank,
     HelpRow::Section(" Par y B+RSI"),
     HelpRow::Key("←→ / h l", "par anterior / siguiente"),
@@ -1519,39 +1541,66 @@ static HELP_ES: &[HelpRow] = &[
     HelpRow::Blank,
     HelpRow::Section(" Whales / Wallet / Liqs"),
     HelpRow::Key("↑↓ / j k", "desplazar posiciones (whales)"),
-    HelpRow::Key("Enter/click", "ver dirección completa de whale · c copia (whales)"),
+    HelpRow::Key(
+        "Enter/click",
+        "ver dirección completa de whale · c copia (whales)",
+    ),
     HelpRow::Key("e", "introducir dirección a observar (wallet)"),
-    HelpRow::Key("↑↓ · Enter", "navegar posiciones · detalle apertura+funding (wallet)"),
+    HelpRow::Key(
+        "↑↓ · Enter",
+        "navegar posiciones · detalle apertura+funding (wallet)",
+    ),
     HelpRow::Key(
         "Tab · Enter",
         "pasar a las listas de wallets relacionadas · abrir esa dirección (Enter ahí la observa)",
     ),
     HelpRow::Key("Backspace", "volver a la wallet observada anteriormente"),
-    HelpRow::Key(
-        "s",
-        "ciclar orden de posiciones: según API → recientes → notional → ROE% (wallet)",
-    ),
-    HelpRow::Key(
-        "col. Abierta",
-        "antigüedad · ≥ = cota inferior (fuera de la ventana de fills) · • = abierta <24h",
-    ),
+    HelpRow::Key("s", "orden de posiciones (API/recientes/ntl/ROE%)"),
+    HelpRow::Key("Abierta", "antigüedad: exacta · ≈ por funding · ≥ cota"),
     HelpRow::Key("r", "rango de precio ±5/15/30% (liqs)"),
     HelpRow::Blank,
     HelpRow::Section(" Fondos (saldo real · ejecución REAL en testnet con agent)"),
-    HelpRow::Key("c / d", "conectar / desconectar MetaMask (QR WalletConnect)"),
-    HelpRow::Key("p", "depositar USDC al bridge (REAL · mín 5 USDC · doble confirmación)"),
-    HelpRow::Key("w", "retirar USDC a tu wallet (REAL · fee $1 · firma EIP-712 gasless)"),
-    HelpRow::Key("a", "autorizar agent wallet (firma única · trading sin retiro · clave local)"),
-    HelpRow::Key("t", "transferir USDC spot ⇄ perps (solo cuenta NO unificada · gasless)"),
+    HelpRow::Key(
+        "c / d",
+        "conectar / desconectar MetaMask (QR WalletConnect)",
+    ),
+    HelpRow::Key(
+        "p",
+        "depositar USDC al bridge (REAL · mín 5 USDC · doble confirmación)",
+    ),
+    HelpRow::Key(
+        "w",
+        "retirar USDC a tu wallet (REAL · fee $1 · firma EIP-712 gasless)",
+    ),
+    HelpRow::Key(
+        "a",
+        "autorizar agent wallet (firma única · trading sin retiro · clave local)",
+    ),
+    HelpRow::Key(
+        "t",
+        "transferir USDC spot ⇄ perps (solo cuenta NO unificada · gasless)",
+    ),
     HelpRow::Key("↑↓ / j k", "mover foco: formulario → posiciones → órdenes"),
-    HelpRow::Key("←→ / h l", "ajustar campo (par, lado, leverage, tipo, unidad)"),
-    HelpRow::Key("Enter", "editar campo · revisar orden · SL/TP de la posición"),
+    HelpRow::Key(
+        "←→ / h l",
+        "ajustar campo (par, lado, leverage, tipo, unidad)",
+    ),
+    HelpRow::Key(
+        "Enter",
+        "editar campo · revisar orden · SL/TP de la posición",
+    ),
     HelpRow::Key("x / e", "cerrar posición o cancelar orden / editar SL/TP"),
-    HelpRow::Key("ratón", "click en campos/botones · slider de leverage arrastrable"),
+    HelpRow::Key(
+        "ratón",
+        "click en campos/botones · slider de leverage arrastrable",
+    ),
     HelpRow::Blank,
     HelpRow::Section(" Flujo"),
     HelpRow::Key("w", "ventana de rotación (1h/4h/24h)"),
-    HelpRow::Key("s", "modo de orden (rotación / combustible liqs / confluencia)"),
+    HelpRow::Key(
+        "s",
+        "modo de orden (rotación / combustible liqs / confluencia)",
+    ),
     HelpRow::Key("r", "invertir orden (combustible: sesgo bajista ↔ alcista)"),
     HelpRow::Key("/", "buscar par (como en Ranking)"),
     HelpRow::Key("Enter", "fija el par del panel de posicionamiento"),

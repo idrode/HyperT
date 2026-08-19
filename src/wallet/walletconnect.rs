@@ -118,12 +118,23 @@ pub struct TransferReq {
 #[derive(Debug, Clone)]
 pub enum TransferStatus {
     /// wc_sessionRequest publicado; falta aprobar la firma EIP-712 en MetaMask.
-    AwaitingWallet { usdc: f64, to_perp: bool },
+    AwaitingWallet {
+        usdc: f64,
+        to_perp: bool,
+    },
     /// Hyperliquid aceptó la transferencia (debería reflejarse en segundos).
-    Accepted { usdc: f64, to_perp: bool },
+    Accepted {
+        usdc: f64,
+        to_perp: bool,
+    },
     /// El saldo del lado destino ya subió lo transferido.
-    Arrived { usdc: f64, to_perp: bool },
-    Failed { error: String },
+    Arrived {
+        usdc: f64,
+        to_perp: bool,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Petición de depósito ya validada por la UI (≥ mínimo del bridge, ≤ saldo).
@@ -146,12 +157,22 @@ pub struct DepositReq {
 #[derive(Debug, Clone)]
 pub enum DepositStatus {
     /// wc_sessionRequest publicado; falta aprobar la firma en MetaMask.
-    AwaitingWallet { usdc: f64 },
+    AwaitingWallet {
+        usdc: f64,
+    },
     /// Firmada y difundida; esperando el receipt on-chain.
-    Submitted { usdc: f64, tx: String },
+    Submitted {
+        usdc: f64,
+        tx: String,
+    },
     /// Receipt OK: Hyperliquid acredita al remitente en <1 min.
-    Confirmed { usdc: f64, tx: String },
-    Failed { error: String },
+    Confirmed {
+        usdc: f64,
+        tx: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Petición de retiro ya validada por la UI (> comisión, ≤ withdrawable).
@@ -201,29 +222,50 @@ pub struct AgentReq {
 #[derive(Debug, Clone)]
 pub enum AgentStatus {
     /// wc_sessionRequest publicado; falta aprobar la firma EIP-712 en MetaMask.
-    AwaitingWallet { agent: String },
+    AwaitingWallet {
+        agent: String,
+    },
     /// /exchange respondió ok y la clave quedó guardada en `path`.
-    Accepted { agent: String, path: String },
+    Accepted {
+        agent: String,
+        path: String,
+    },
     /// Además, extraAgents del Info API ya lista el agent — verificación
     /// independiente de que el servidor lo registró.
-    Verified { agent: String, path: String },
+    Verified {
+        agent: String,
+        path: String,
+    },
     /// ok de /exchange y clave guardada, pero extraAgents no lo listó dentro
     /// del plazo — no es un fallo confirmado: la validación definitiva es la
     /// primera orden firmada con la agent key (paso 7).
-    Unlisted { agent: String, path: String },
-    Failed { error: String },
+    Unlisted {
+        agent: String,
+        path: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Fases del retiro real que pinta la Vista 8 (`DataMsg::Withdraw`).
 #[derive(Debug, Clone)]
 pub enum WithdrawStatus {
     /// wc_sessionRequest publicado; falta aprobar la firma EIP-712 en MetaMask.
-    AwaitingWallet { usdc: f64 },
+    AwaitingWallet {
+        usdc: f64,
+    },
     /// Hyperliquid aceptó la solicitud; procesa y envía en ~5 min.
-    Accepted { usdc: f64 },
+    Accepted {
+        usdc: f64,
+    },
     /// El USDC llegó a la wallet on-chain (balanceOf subió lo esperado).
-    Arrived { usdc: f64 },
-    Failed { error: String },
+    Arrived {
+        usdc: f64,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Typed data EIP-712 del retiro, byte a byte lo que verifica el servidor:
@@ -1041,7 +1083,10 @@ async fn submit_transfer(
         return;
     }
     let (usdc, to_perp) = (req.usdc, req.to_perp);
-    let _ = tx.send(DataMsg::Transfer(TransferStatus::Accepted { usdc, to_perp }));
+    let _ = tx.send(DataMsg::Transfer(TransferStatus::Accepted {
+        usdc,
+        to_perp,
+    }));
 
     let Some(base) = baseline else {
         return; // sin baseline no hay vigilancia honesta — Accepted es terminal
@@ -1256,7 +1301,10 @@ async fn watch_receipt(tx: UnboundedSender<DataMsg>, rpc: String, txhash: String
         };
         match status.as_deref() {
             Some("0x1") => {
-                let _ = tx.send(DataMsg::Deposit(DepositStatus::Confirmed { usdc, tx: txhash }));
+                let _ = tx.send(DataMsg::Deposit(DepositStatus::Confirmed {
+                    usdc,
+                    tx: txhash,
+                }));
                 return;
             }
             Some("0x0") => {
@@ -1353,11 +1401,12 @@ async fn submit_withdraw(
         let _ = tx.send(DataMsg::Withdraw(WithdrawStatus::Failed { error }));
         return;
     }
-    let _ = tx.send(DataMsg::Withdraw(WithdrawStatus::Accepted { usdc: req.usdc }));
+    let _ = tx.send(DataMsg::Withdraw(WithdrawStatus::Accepted {
+        usdc: req.usdc,
+    }));
 
     // llegada esperada: cantidad pedida menos la comisión de $1
-    let expected =
-        req.units.saturating_sub(crate::data::WITHDRAW_FEE_UNITS) as f64 / 1e6 - 1e-6;
+    let expected = req.units.saturating_sub(crate::data::WITHDRAW_FEE_UNITS) as f64 / 1e6 - 1e-6;
     let (Some(d), Some(base)) = (dest, baseline) else {
         return; // sin baseline no hay vigilancia honesta — Accepted es terminal
     };
@@ -1366,7 +1415,9 @@ async fn submit_withdraw(
         tokio::time::sleep(ARRIVAL_POLL).await;
         if let Ok(b) = crate::data::fetch_usdc_balance(&client, &req.rpc, &req.token, d).await {
             if b >= base + expected {
-                let _ = tx.send(DataMsg::Withdraw(WithdrawStatus::Arrived { usdc: req.usdc }));
+                let _ = tx.send(DataMsg::Withdraw(WithdrawStatus::Arrived {
+                    usdc: req.usdc,
+                }));
                 return;
             }
         }
@@ -1811,7 +1862,9 @@ mod tests {
         for f in fields {
             let name = f["name"].as_str().unwrap();
             match f["type"].as_str().unwrap() {
-                "string" => enc.extend_from_slice(keccak256(msg[name].as_str().unwrap()).as_slice()),
+                "string" => {
+                    enc.extend_from_slice(keccak256(msg[name].as_str().unwrap()).as_slice())
+                }
                 "uint64" => {
                     let mut w = [0u8; 32];
                     w[24..].copy_from_slice(&msg[name].as_u64().unwrap().to_be_bytes());
@@ -2093,7 +2146,11 @@ mod tests {
             .await
             .expect("respuesta JSON");
         println!("respuesta de testnet: {j}");
-        assert_eq!(j["status"].as_str(), Some("err"), "esperaba err, no ok: {j}");
+        assert_eq!(
+            j["status"].as_str(),
+            Some("err"),
+            "esperaba err, no ok: {j}"
+        );
         let resp = j["response"].as_str().unwrap_or_default();
         assert!(
             resp.contains("Unable to recover signer") || resp.contains("does not exist"),
@@ -2134,7 +2191,11 @@ mod tests {
             .await
             .expect("respuesta JSON");
         println!("respuesta de testnet: {j}");
-        assert_eq!(j["status"].as_str(), Some("err"), "esperaba err, no ok: {j}");
+        assert_eq!(
+            j["status"].as_str(),
+            Some("err"),
+            "esperaba err, no ok: {j}"
+        );
         let resp = j["response"].as_str().unwrap_or_default();
         // recuperación imposible (lo esperado) o, si algún día recuperara una
         // dirección basura, cuenta inexistente — ambas prueban el formato OK

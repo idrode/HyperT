@@ -36,7 +36,14 @@ fn draw_addr_modal(f: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
     let s = crate::i18n::t();
-    draw_addr_overlay(f, area, addr, feedback, s.wh_modal_title, s.wh_modal_copy_hint);
+    draw_addr_overlay(
+        f,
+        area,
+        addr,
+        feedback,
+        s.wh_modal_title,
+        s.wh_modal_copy_hint,
+    );
 }
 
 /// Overlay reusable de "dirección completa": lo comparten el modal de whale
@@ -50,7 +57,9 @@ pub(super) fn draw_addr_overlay(
     title: &str,
     hint: &str,
 ) {
-    let w = (addr.len() as u16 + 6).max(hint.len() as u16 + 4).min(area.width);
+    let w = (addr.len() as u16 + 6)
+        .max(hint.len() as u16 + 4)
+        .min(area.width);
     let h = 7u16.min(area.height);
     let r = Rect::new(
         area.x + (area.width.saturating_sub(w)) / 2,
