@@ -62,9 +62,15 @@ fn wall_ms() -> u64 {
 }
 
 /// Cuánto historial se le pide al servidor de backfill opcional
-/// (`data::backfill`): OI hasta 25h atrás (ventana lenta de 24h + margen) y
-/// delta por vela hasta 48h (la capacidad de `DeltaState`).
-pub const OI_LOOKBACK_MS: u64 = 25 * 3600 * 1000;
+/// (`data::backfill`): OI hasta 72h atrás y delta por vela hasta 48h (la
+/// capacidad de `DeltaState`).
+///
+/// Las 72h las manda la señal de densidad de liquidación en temporalidad 1h:
+/// necesita 61 velas de calendario reales con su OI al cierre, así que una
+/// ventana de 25h (la que bastaba para la rotación lenta de 24h de la Vista 6)
+/// dejaba el contador clavado muy por debajo de 61/61. 72h da margen sobre las
+/// 61 necesarias sin pasarse de lo que un daemon en un teléfono sirve rápido.
+pub const OI_LOOKBACK_MS: u64 = 72 * 3600 * 1000;
 pub const DELTA_LOOKBACK_MS: u64 = 48 * 3600 * 1000;
 /// Espaciado mínimo entre muestras sembradas en el historial rápido: la misma
 /// cadencia del poller de contextos, para que HIST_CAP siga cubriendo ~1h.
@@ -609,11 +615,36 @@ impl PairState {
             self.slow_hist.pop_front();
         }
 
-        // OI por cierre de vela: solo si aún no hay nada acumulado en vivo
-        // (push_oi_candles asume orden creciente y escribe por la cola).
-        if self.oi_candles.values().all(|d| d.is_empty()) {
+        // OI por cierre de vela. `push_oi_candles` solo sabe escribir por la
+        // cola (asume orden creciente), así que aquí se hace la mezcla por
+        // delante: se agrupan las muestras del servidor en sus buckets de
+        // cierre y se insertan únicamente las ANTERIORES al bucket más viejo ya
+        // acumulado en vivo. Antes esto era una guarda todo-o-nada
+        // (`all(is_empty)`) que en la práctica descartaba SIEMPRE el backfill:
+        // el poller de contextos escribe su primer snapshot a los pocos
+        // segundos, mucho antes de que terminen las ~30 peticiones al daemon.
+        for iv in Interval::ALL {
+            let int = iv.ms();
+            let mut buckets: Vec<(u64, f64)> = Vec::new();
             for pt in pts {
-                self.push_oi_candles(pt.ts_ms, pt.oi);
+                let close = (pt.ts_ms / int + 1) * int;
+                match buckets.last_mut() {
+                    // el último valor visto dentro del bucket es ≈ el OI al cierre
+                    Some(last) if last.0 == close => last.1 = pt.oi,
+                    Some(last) if last.0 > close => {}
+                    _ => buckets.push((close, pt.oi)),
+                }
+            }
+            let dq = self.oi_candles.entry(iv).or_default();
+            let limit = dq.front().map(|(c, _)| *c);
+            for (close, oi) in buckets.into_iter().rev() {
+                if limit.is_some_and(|f| close >= f) {
+                    continue;
+                }
+                dq.push_front((close, oi));
+            }
+            while dq.len() > OI_CANDLE_CAP {
+                dq.pop_front();
             }
         }
     }
@@ -4038,6 +4069,44 @@ mod tests {
         assert_eq!(p.hist.len(), 2);
         assert_eq!(p.hist.front().map(|h| h.oi), Some(999.0));
         assert_eq!(p.hist.back().map(|h| h.oi), Some(50.0));
+    }
+
+    /// Regresión de la carrera backfill↔poller: el poller de contextos escribe
+    /// su primer snapshot a los pocos segundos, mucho antes de que terminen las
+    /// ~30 peticiones al daemon. Con la guarda todo-o-nada anterior eso bastaba
+    /// para descartar TODO el OI por cierre de vela del backfill en silencio.
+    #[test]
+    fn seed_history_mezcla_oi_por_vela_con_lo_ya_vivo() {
+        let mut p = PairState::new(PairMeta {
+            name: "BTC".into(),
+            sz_decimals: 3,
+            max_leverage: 40,
+        });
+        let now = Instant::now();
+        let hour = 3_600_000u64;
+        let now_ms = 10_000 * hour;
+        // el poller llega primero: un snapshot en vivo del bucket actual
+        p.push_oi_candles(now_ms, 500.0);
+        // …y luego el backfill con 70h de muestras horarias
+        let pts: Vec<BackfillOi> = (0..=70)
+            .map(|k: u64| BackfillOi {
+                ts_ms: now_ms - (70 - k) * hour,
+                oi: 100.0 + k as f64,
+                mark_px: 100.0,
+            })
+            .collect();
+        p.seed_history(&pts, now, now_ms);
+
+        let dq = p.oi_candles.get(&Interval::H1).unwrap();
+        // 70 buckets sembrados + el que ya tenía el vivo (compartido con el
+        // último punto del backfill, que no lo pisa)
+        assert_eq!(dq.len(), 71);
+        assert_eq!(dq.back().map(|(_, oi)| *oi), Some(500.0));
+        // contiguos y ascendentes: liq_bars corta la serie ante cualquier hueco
+        let closes: Vec<u64> = dq.iter().map(|(c, _)| *c).collect();
+        assert!(closes.windows(2).all(|w| w[1] == w[0] + hour));
+        // el cap sigue holgado para la ventana ampliada en TF 1h
+        assert!(dq.len() <= OI_CANDLE_CAP);
     }
 
     const MASTER: &str = "0x000000000000000000000000000000000000dead";
