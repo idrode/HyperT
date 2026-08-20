@@ -17,7 +17,10 @@ fn short_addr(a: &str) -> String {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
-    let rows_layout = Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).split(area);
+    // una línea extra en los modos de PnL para la cobertura del escaneo: el
+    // ranking de PnL solo es legible sabiendo de cuántas cuentas se sabe algo
+    let head_h = if app.whale_sort.is_pnl() { 5 } else { 4 };
+    let rows_layout = Layout::vertical([Constraint::Length(head_h), Constraint::Min(3)]).split(area);
 
     draw_summary(f, app, rows_layout[0]);
     draw_table(f, app, rows_layout[1]);
@@ -154,7 +157,7 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         (None, None) => tr.wh_starting.to_string(),
     };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             dim(format!("Σ {} ", tr.wh_long)),
             Span::styled(fmt_usd(long_ntl), Style::new().fg(Color::Green)),
@@ -169,6 +172,29 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(concentr),
     ];
+    // Cobertura del escaneo: sin esto, ordenar por PnL invita a leer la tabla
+    // como un ranking cerrado del top-100, cuando puede faltar gente.
+    if app.whale_sort.is_pnl() {
+        let scan = app.whale_scan.unwrap_or_default();
+        let mut spans = vec![dim(format!(
+            "{}/{} {}",
+            scan.scanned, scan.total, tr.wh_scan_scanned
+        ))];
+        if !scan.complete() {
+            spans.push(Span::styled(
+                format!(" · {}", tr.wh_scan_partial),
+                Style::new().fg(Color::Yellow),
+            ));
+        }
+        if scan.failed > 0 {
+            spans.push(Span::styled(
+                format!(" · {} {}", scan.failed, tr.wh_scan_failed),
+                Style::new().fg(Color::Yellow),
+            ));
+        }
+        spans.push(dim(format!(" · {}", tr.wh_absent_note)));
+        lines.push(Line::from(spans));
+    }
     f.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(tr.wh_title)),
         area,
@@ -176,25 +202,31 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
-    // filas aplanadas (whale, posición), ordenadas por notional desc
-    let mut flat: Vec<(&str, f64, &PosInfo)> = app
-        .whales
+    // filas aplanadas (whale, posición) en el orden del modo activo; el orden
+    // lo decide `app::whale_row_order`, la misma fuente que usa la selección
+    let order = app.whale_rows();
+    let pnl_mode = app.whale_sort.is_pnl();
+    let flat: Vec<(&str, f64, &PosInfo, Option<f64>, bool)> = order
         .iter()
-        .flat_map(|w| {
-            w.positions
-                .iter()
-                .map(move |p| (w.addr.as_str(), w.account_value, p))
+        .enumerate()
+        .map(|(row, &(wi, pi))| {
+            let w = &app.whales[wi];
+            // el Σ uPnL es de la CUENTA: se pinta solo en la primera fila de
+            // cada whale, para que no parezca un valor por posición
+            let first = row == 0 || order[row - 1].0 != wi;
+            (
+                w.addr.as_str(),
+                w.account_value,
+                &w.positions[pi],
+                crate::app::whale_agg_pnl(w),
+                first,
+            )
         })
         .collect();
-    flat.sort_by(|a, b| {
-        b.2.position_value
-            .partial_cmp(&a.2.position_value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
 
     let tr = crate::i18n::t();
     let header_style = Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD);
-    let header = Row::new(vec![
+    let mut header_cells = vec![
         tr.wh_col_account,
         tr.wh_col_value,
         tr.rk_col_pair,
@@ -205,17 +237,22 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         "Lev",
         "uPnL $",
         "ROE%",
-    ])
-    .style(header_style);
+    ];
+    // la columna del agregado solo aparece en los modos que ordenan por él,
+    // que son los únicos en que las filas van agrupadas por cuenta
+    if pnl_mode {
+        header_cells.push(tr.wh_col_agg_pnl);
+    }
+    let header = Row::new(header_cells).style(header_style);
 
     let rows: Vec<Row> = flat
         .iter()
-        .map(|(addr, acct, p)| {
+        .map(|(addr, acct, p, agg, first_of_whale)| {
             let long = p.szi >= 0.0;
             let side = if long { "LONG" } else { "SHORT" };
             let side_color = if long { Color::Green } else { Color::Red };
             let lev = format!("{}×{}", p.leverage, if p.is_cross { "c" } else { "i" });
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(short_addr(addr)).style(Style::new().fg(Color::Cyan)),
                 Cell::from(fmt_usd(*acct)),
                 Cell::from(p.coin.clone()).style(Style::new().add_modifier(Modifier::BOLD)),
@@ -229,12 +266,28 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     .style(Style::new().fg(sign_color(Some(p.unrealized_pnl), false))),
                 Cell::from(format!("{:+.1}", p.roe * 100.0))
                     .style(Style::new().fg(sign_color(Some(p.roe), false))),
-            ])
+            ];
+            if pnl_mode {
+                // "—" = sin dato (no debería darse en una whale listada);
+                // un 0.00 pintado es un cero real, no un hueco.
+                // El valor se repite en todas las filas de la cuenta —atenuado
+                // en las de continuación— porque con la tabla desplazada la
+                // primera fila del grupo puede quedar fuera de pantalla y el
+                // dato desaparecería justo cuando se está mirando.
+                let cell = match agg {
+                    Some(v) if *first_of_whale => Cell::from(fmt_usd(*v))
+                        .style(Style::new().fg(sign_color(Some(*v), false))),
+                    Some(v) => Cell::from(fmt_usd(*v)).style(Style::new().fg(Color::DarkGray)),
+                    None => Cell::from("—").style(Style::new().fg(Color::DarkGray)),
+                };
+                cells.push(cell);
+            }
+            Row::new(cells)
         })
         .collect();
 
     let n = rows.len();
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(12),
         Constraint::Length(8),
         Constraint::Length(7),
@@ -246,9 +299,18 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(9),
         Constraint::Length(7),
     ];
+    if pnl_mode {
+        widths.push(Constraint::Length(10));
+    }
+    let title = format!(
+        " {n} {} · {} ({}) ",
+        tr.wh_positions_hint,
+        app.whale_sort.label(),
+        tr.wh_sort_hint
+    );
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title(format!(" {n} {} ", tr.wh_positions_hint)))
+        .block(Block::bordered().title(title))
         .row_highlight_style(
             Style::new()
                 .bg(Color::Rgb(40, 44, 66))

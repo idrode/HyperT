@@ -234,6 +234,29 @@ pub struct WhaleInfo {
     pub positions: Vec<PosInfo>,
 }
 
+/// Cobertura del escaneo que produjo una lista de whales. Sin esto, la lista
+/// no se puede leer con honestidad: una cuenta ausente puede serlo porque se
+/// consultó y NO tenía posiciones abiertas (dato real) o porque todavía no se
+/// ha consultado / su consulta falló (sin dato) — y ordenar por PnL agregado
+/// hace que esa diferencia importe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WhaleScan {
+    /// Cuentas del leaderboard ya consultadas (con o sin posiciones).
+    pub scanned: usize,
+    /// Cuentas del leaderboard que el escaneo pretende cubrir.
+    pub total: usize,
+    /// Cuentas cuya consulta falló: sin dato, NO cero.
+    pub failed: usize,
+}
+
+impl WhaleScan {
+    /// Un escaneo completo es el que ha consultado todas las cuentas. Que
+    /// alguna fallara no lo hace incompleto, pero sí deja huecos (`failed`).
+    pub fn complete(&self) -> bool {
+        self.total > 0 && self.scanned >= self.total
+    }
+}
+
 /// Estado de una cuenta observada (wallet watch-only). Solo lectura de datos públicos.
 #[derive(Debug, Clone)]
 pub struct AccountSnapshot {
@@ -345,8 +368,13 @@ pub enum DataMsg {
         sell_ntl: f64,
         t_ms: u64,
     },
-    /// Posiciones de las cuentas top del leaderboard.
-    Whales(Vec<WhaleInfo>),
+    /// Posiciones de las cuentas top del leaderboard, con la cobertura del
+    /// escaneo que las produjo (los volcados parciales del primer escaneo
+    /// llegan por aquí igual que la lista final).
+    Whales {
+        list: Vec<WhaleInfo>,
+        scan: WhaleScan,
+    },
     /// Progreso/estado del tracker de whales (el leaderboard pesa ~30MB).
     WhaleStatus(String),
     /// Estado de la dirección observada en la vista wallet.

@@ -15,7 +15,7 @@ use tokio::time::sleep;
 
 use types::{
     AccountMode, AccountSnapshot, CandlePoint, CtxSnapshot, DataMsg, ExtraReq, FillInfo, PairMeta,
-    PosInfo, SpotSnapshot, TransferInfo, WhaleInfo,
+    PosInfo, SpotSnapshot, TransferInfo, WhaleInfo, WhaleScan,
 };
 
 const CTX_POLL_SECS: u64 = 5;
@@ -711,7 +711,14 @@ async fn whale_watcher(base: BaseUrl, tx: UnboundedSender<DataMsg>) {
                     i + 1,
                     addrs.len()
                 )));
-                let _ = tx.send(DataMsg::Whales(whales.clone()));
+                let _ = tx.send(DataMsg::Whales {
+                    list: whales.clone(),
+                    scan: WhaleScan {
+                        scanned: i + 1,
+                        total: addrs.len(),
+                        failed: errs,
+                    },
+                });
             }
             sleep(Duration::from_millis(WHALE_STEP_MS)).await;
         }
@@ -727,7 +734,14 @@ async fn whale_watcher(base: BaseUrl, tx: UnboundedSender<DataMsg>) {
             addrs.len(),
             whales.len()
         )));
-        let _ = tx.send(DataMsg::Whales(whales));
+        let _ = tx.send(DataMsg::Whales {
+            list: whales,
+            scan: WhaleScan {
+                scanned: addrs.len(),
+                total: addrs.len(),
+                failed: errs,
+            },
+        });
         first_scan = false;
         sleep(Duration::from_secs(WHALE_POLL_SECS)).await;
     }

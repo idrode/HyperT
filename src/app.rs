@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, watch};
 use crate::data::types::{
     AccountMode, AccountSnapshot, BackfillDelta, BackfillOi, CandlePoint, CtxSnapshot, DataMsg,
     ExtraReq, FillInfo, Interval, LiveOrd, OpenEst, OpenKind, PairMeta, PosInfo, SpotSnapshot,
-    TransferInfo, WhaleInfo,
+    TransferInfo, WhaleInfo, WhaleScan,
 };
 use crate::exec::{self, Confirm, ExecState, Focus, Hit, SlTpEdit};
 use crate::liqdens::LiqBar;
@@ -199,6 +199,115 @@ impl WalletSort {
             WalletSort::Roe => crate::i18n::t().wa_sort_roe,
         }
     }
+}
+
+/// Modos de orden de la tabla de whales (Vista 7), ciclados con `s` igual que
+/// `SortCol` (Vista 1), `FlowSort` (Vista 6) y `WalletSort` (Vista 9).
+///
+/// La tabla pinta una fila por POSICIÓN, pero el PnL que interesa comparar es
+/// el de la CUENTA: en los modos de PnL las filas se agrupan por whale y los
+/// grupos se ordenan por su PnL no realizado agregado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhaleSort {
+    /// Notional de la posición, de mayor a menor (el orden de siempre).
+    Notional,
+    /// PnL no realizado agregado de la cuenta, de mayor a menor: quién gana más.
+    PnlDesc,
+    /// El mismo, de menor a mayor: quién pierde más.
+    PnlAsc,
+}
+
+impl WhaleSort {
+    pub fn next(self) -> Self {
+        match self {
+            WhaleSort::Notional => WhaleSort::PnlDesc,
+            WhaleSort::PnlDesc => WhaleSort::PnlAsc,
+            WhaleSort::PnlAsc => WhaleSort::Notional,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            WhaleSort::Notional => crate::i18n::t().wh_sort_ntl,
+            WhaleSort::PnlDesc => crate::i18n::t().wh_sort_pnl_desc,
+            WhaleSort::PnlAsc => crate::i18n::t().wh_sort_pnl_asc,
+        }
+    }
+
+    pub fn is_pnl(&self) -> bool {
+        !matches!(self, WhaleSort::Notional)
+    }
+}
+
+/// PnL no realizado agregado de una whale: suma simple del `unrealizedPnl` de
+/// todas sus posiciones abiertas, tal cual lo devuelve `clearinghouseState`
+/// (ya viene en USD, así que sumar es la agregación correcta; ponderar por
+/// notional daría un número que no es dinero).
+///
+/// Devuelve `Option` a propósito: `Some(0.0)` es un cero REAL (cuenta escaneada
+/// sin posiciones abiertas, o con posiciones que se compensan al céntimo) y
+/// `None` es "sin dato". Una whale presente en la lista siempre trae su estado
+/// completo — `clearinghouseState` devuelve todas sus posiciones de una vez —,
+/// así que aquí `None` solo aparece si la cuenta llegó sin posiciones; las
+/// cuentas que fallaron o que aún no se han escaneado ni siquiera están en la
+/// lista, y de ésas informa `WhaleScan` (ver `App::whale_scan`).
+pub fn whale_agg_pnl(w: &WhaleInfo) -> Option<f64> {
+    if w.positions.is_empty() {
+        return None;
+    }
+    Some(w.positions.iter().map(|p| p.unrealized_pnl).sum())
+}
+
+/// Orden de las filas de la tabla de whales: pares `(índice de whale, índice de
+/// posición dentro de esa whale)`. Función pura, misma fuente de verdad para el
+/// pintado (`ui::whales`) y para saber a qué dirección corresponde una fila
+/// (`App::whale_addr_at`) — antes cada uno reimplementaba el orden por su lado.
+///
+/// En los modos de PnL, las whales sin PnL agregado ("sin dato") van al final,
+/// nunca mezcladas con las que valen 0 de verdad — misma regla que
+/// `wallet_pos_order` en la Vista 9.
+pub fn whale_row_order(whales: &[WhaleInfo], sort: WhaleSort) -> Vec<(usize, usize)> {
+    let mut rows: Vec<(usize, usize)> = whales
+        .iter()
+        .enumerate()
+        .flat_map(|(wi, w)| (0..w.positions.len()).map(move |pi| (wi, pi)))
+        .collect();
+    let cmp_f = |a: f64, b: f64| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal);
+    match sort {
+        WhaleSort::Notional => rows.sort_by(|&(wa, pa), &(wb, pb)| {
+            cmp_f(
+                whales[wb].positions[pb].position_value,
+                whales[wa].positions[pa].position_value,
+            )
+            .then((wa, pa).cmp(&(wb, pb)))
+        }),
+        WhaleSort::PnlDesc | WhaleSort::PnlAsc => {
+            let agg: Vec<Option<f64>> = whales.iter().map(whale_agg_pnl).collect();
+            rows.sort_by(|&(wa, pa), &(wb, pb)| {
+                // nivel 1: sin dato al final, pase lo que pase
+                let rank = |x: Option<f64>| u8::from(x.is_some());
+                let ord = rank(agg[wb])
+                    .cmp(&rank(agg[wa]))
+                    // nivel 2: PnL agregado de la cuenta (agrupa por whale)
+                    .then_with(|| {
+                        let (va, vb) = (agg[wa].unwrap_or(0.0), agg[wb].unwrap_or(0.0));
+                        match sort {
+                            WhaleSort::PnlAsc => cmp_f(va, vb),
+                            _ => cmp_f(vb, va),
+                        }
+                    })
+                    // nivel 3: dentro de la misma whale, la posición más grande
+                    .then_with(|| {
+                        cmp_f(
+                            whales[wb].positions[pb].position_value,
+                            whales[wa].positions[pa].position_value,
+                        )
+                    });
+                ord.then((wa, pa).cmp(&(wb, pb)))
+            })
+        }
+    }
+    rows
 }
 
 /// Antigüedad por debajo de la cual una posición se marca como recién abierta.
@@ -1041,6 +1150,10 @@ pub struct App {
     pub whales_at: Option<Instant>,
     pub whale_sel: usize,
     pub whales_state: TableState,
+    /// Modo de orden de la tabla de whales (tecla `s`).
+    pub whale_sort: WhaleSort,
+    /// Cobertura del último escaneo recibido; None = todavía no llegó ninguno.
+    pub whale_scan: Option<WhaleScan>,
     /// Modal de dirección completa de whale (Vista 7): (dirección, feedback de copia).
     pub whale_modal: Option<(String, Option<String>)>,
     /// Rect de la zona de datos de la tabla de whales (para mapear clicks a filas).
@@ -1226,6 +1339,8 @@ impl App {
             whales_at: None,
             whale_sel: 0,
             whales_state: TableState::default(),
+            whale_sort: WhaleSort::Notional,
+            whale_scan: None,
             whale_modal: None,
             whale_rows_area: None,
             wallet: None,
@@ -1478,9 +1593,16 @@ impl App {
                     }
                 }
             }
-            DataMsg::Whales(w) => {
-                self.whales = w;
+            DataMsg::Whales { list, scan } => {
+                // la fila seleccionada se sigue por (dirección, par): la lista
+                // se reemplaza entera en cada escaneo y el índice crudo saltaría
+                let anchor = self.whale_row_key(self.whale_sel);
+                self.whales = list;
+                self.whale_scan = Some(scan);
                 self.whales_at = Some(Instant::now());
+                if let Some(i) = anchor.and_then(|k| self.whale_row_index_of(&k)) {
+                    self.whale_sel = i;
+                }
                 let n = self.whale_rows_len();
                 if self.whale_sel >= n {
                     self.whale_sel = n.saturating_sub(1);
@@ -1579,20 +1701,40 @@ impl App {
         self.whales.iter().map(|w| w.positions.len()).sum()
     }
 
-    /// Dirección completa de la whale de la fila `idx`, respetando el mismo
-    /// orden (por notional desc) con que se dibuja la tabla en `ui::whales`.
+    /// Filas de la tabla de whales en el orden en que se pintan, según el modo
+    /// de orden activo. Fuente única para el pintado y para la selección.
+    pub fn whale_rows(&self) -> Vec<(usize, usize)> {
+        whale_row_order(&self.whales, self.whale_sort)
+    }
+
+    /// Dirección completa de la whale de la fila `idx`, respetando el orden con
+    /// que se dibuja la tabla en `ui::whales`.
     pub fn whale_addr_at(&self, idx: usize) -> Option<String> {
-        let mut flat: Vec<(&str, f64)> = self
-            .whales
-            .iter()
-            .flat_map(|w| {
-                w.positions
-                    .iter()
-                    .map(move |p| (w.addr.as_str(), p.position_value))
-            })
-            .collect();
-        flat.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        flat.get(idx).map(|(a, _)| a.to_string())
+        let (wi, _) = *self.whale_rows().get(idx)?;
+        Some(self.whales[wi].addr.clone())
+    }
+
+    /// Identidad estable de una fila: (dirección, par). El índice no sirve como
+    /// ancla porque el orden cambia con `s` y la lista se reemplaza entera.
+    fn whale_row_key(&self, idx: usize) -> Option<(String, String)> {
+        let (wi, pi) = *self.whale_rows().get(idx)?;
+        let w = &self.whales[wi];
+        Some((w.addr.clone(), w.positions[pi].coin.clone()))
+    }
+
+    fn whale_row_index_of(&self, key: &(String, String)) -> Option<usize> {
+        self.whale_rows().iter().position(|&(wi, pi)| {
+            self.whales[wi].addr == key.0 && self.whales[wi].positions[pi].coin == key.1
+        })
+    }
+
+    /// Cicla el modo de orden manteniendo seleccionada la misma fila.
+    fn cycle_whale_sort(&mut self) {
+        let anchor = self.whale_row_key(self.whale_sel);
+        self.whale_sort = self.whale_sort.next();
+        self.whale_sel = anchor
+            .and_then(|k| self.whale_row_index_of(&k))
+            .unwrap_or(0);
     }
 
     /// Nº de posiciones abiertas de la wallet observada (Vista 9).
@@ -3817,6 +3959,7 @@ impl App {
                 KeyCode::PageDown => self.move_whale_sel(15),
                 KeyCode::PageUp => self.move_whale_sel(-15),
                 KeyCode::Enter => self.open_whale_modal(),
+                KeyCode::Char('s') => self.cycle_whale_sort(),
                 KeyCode::Esc => self.view = View::Ranking,
                 _ => {}
             },
@@ -5173,6 +5316,90 @@ mod tests {
             liq_px: None,
             since_open_funding: 0.0,
         }
+    }
+
+    fn whale(addr: &str, positions: Vec<PosInfo>) -> WhaleInfo {
+        WhaleInfo {
+            addr: addr.into(),
+            account_value: 1_000_000.0,
+            positions,
+        }
+    }
+
+    fn with_pnl(mut p: PosInfo, pnl: f64) -> PosInfo {
+        p.unrealized_pnl = pnl;
+        p
+    }
+
+    /// Orden de la tabla de whales (Vista 7): por notional de posición suelta,
+    /// o agrupando por cuenta y ordenando los grupos por su uPnL agregado.
+    #[test]
+    fn orden_de_whales_por_modo() {
+        let a = whale(
+            "0xaaa",
+            vec![
+                with_pnl(pos("BTC", 1.0, 500.0, 0.1), -300.0),
+                with_pnl(pos("ETH", 1.0, 900.0, 0.1), 500.0),
+            ],
+        ); // agregado: +200
+        let b = whale("0xbbb", vec![with_pnl(pos("SOL", 1.0, 700.0, 0.1), 900.0)]); // +900
+        let c = whale("0xccc", vec![with_pnl(pos("HYPE", 1.0, 100.0, 0.1), -50.0)]); // −50
+        let ws = vec![a, b, c];
+        let addr_of = |rows: &[(usize, usize)]| -> Vec<String> {
+            rows.iter().map(|&(w, _)| ws[w].addr.clone()).collect()
+        };
+
+        // notional: filas sueltas, mayor primero (ETH 900, SOL 700, BTC 500, HYPE 100)
+        let r = whale_row_order(&ws, WhaleSort::Notional);
+        assert_eq!(
+            r.iter()
+                .map(|&(w, p)| ws[w].positions[p].coin.clone())
+                .collect::<Vec<_>>(),
+            ["ETH", "SOL", "BTC", "HYPE"]
+        );
+
+        // uPnL ↓: bbb(+900) → aaa(+200, sus dos filas juntas) → ccc(−50)
+        let r = whale_row_order(&ws, WhaleSort::PnlDesc);
+        assert_eq!(addr_of(&r), ["0xbbb", "0xaaa", "0xaaa", "0xccc"]);
+        // dentro de la cuenta, la posición más grande arriba
+        assert_eq!(ws[r[1].0].positions[r[1].1].coin, "ETH");
+
+        // uPnL ↑: el que más pierde primero, exactamente al revés
+        let r = whale_row_order(&ws, WhaleSort::PnlAsc);
+        assert_eq!(addr_of(&r), ["0xccc", "0xaaa", "0xaaa", "0xbbb"]);
+    }
+
+    /// Honestidad del agregado: 0 real (posiciones que se compensan) NO es lo
+    /// mismo que "sin dato", y el sin dato nunca se cuela entre los que sí lo
+    /// tienen — ni en el orden descendente ni en el ascendente.
+    #[test]
+    fn whale_pnl_cero_real_no_es_sin_dato() {
+        let compensada = whale(
+            "0xzero",
+            vec![
+                with_pnl(pos("BTC", 1.0, 500.0, 0.0), 250.0),
+                with_pnl(pos("ETH", -1.0, 500.0, 0.0), -250.0),
+            ],
+        );
+        assert_eq!(whale_agg_pnl(&compensada), Some(0.0));
+        // una cuenta sin posiciones abiertas no tiene agregado que mostrar
+        assert_eq!(whale_agg_pnl(&whale("0xsin", vec![])), None);
+
+        let ws = vec![
+            whale("0xsin", vec![]),
+            compensada,
+            whale("0xneg", vec![with_pnl(pos("SOL", 1.0, 10.0, 0.0), -1.0)]),
+        ];
+        // sin dato no aporta filas y no puede desplazar a nadie; el 0 real se
+        // ordena como el número que es, por delante del que pierde
+        for sort in [WhaleSort::PnlDesc, WhaleSort::PnlAsc] {
+            let r = whale_row_order(&ws, sort);
+            assert_eq!(r.len(), 3);
+            assert!(r.iter().all(|&(w, _)| ws[w].addr != "0xsin"));
+        }
+        let desc = whale_row_order(&ws, WhaleSort::PnlDesc);
+        assert_eq!(ws[desc[0].0].addr, "0xzero");
+        assert_eq!(ws[desc[2].0].addr, "0xneg");
     }
 
     /// El orden de la tabla de posiciones (Vista 9) por cada modo del ciclo, y
