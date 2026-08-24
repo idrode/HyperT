@@ -1038,7 +1038,7 @@ mod tests {
         );
         assert!(s.contains("7.5 USDC"), "falta la cantidad exacta:\n{s}");
         assert!(
-            s.contains("Sign in MetaMask"),
+            s.contains("Sign in wallet"),
             "falta el botón de firma:\n{s}"
         );
     }
@@ -1078,7 +1078,7 @@ mod tests {
             "falta el aviso gasless:\n{s}"
         );
         assert!(
-            s.contains("Sign in MetaMask"),
+            s.contains("Sign in wallet"),
             "falta el botón de firma:\n{s}"
         );
 
@@ -1141,7 +1141,7 @@ mod tests {
             "falta el nombre del typed data a comparar en MetaMask:\n{s}"
         );
         assert!(
-            s.contains("Sign in MetaMask"),
+            s.contains("Sign in wallet"),
             "falta el botón de firma:\n{s}"
         );
 
@@ -1229,7 +1229,7 @@ mod tests {
             s.contains("UsdClassTransfer"),
             "falta el nombre del typed data:\n{s}"
         );
-        assert!(s.contains("Sign in MetaMask"), "falta el botón:\n{s}");
+        assert!(s.contains("Sign in wallet"), "falta el botón:\n{s}");
 
         // y las fases en su tira
         app.transfer_ui = None;
