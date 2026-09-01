@@ -21,6 +21,16 @@ pub fn datetime_label(t_ms: u64) -> String {
     }
 }
 
+/// Fecha local sin hora (dd/mm/yy), para fechas donde la hora no aporta
+/// (expiración de la agent key, Vista 8).
+pub fn date_label(t_ms: u64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_millis_opt(t_ms as i64) {
+        chrono::LocalResult::Single(dt) => dt.format("%d/%m/%y").to_string(),
+        _ => "—".to_string(),
+    }
+}
+
 /// Antigüedad del cierre de una vela respecto a ahora.
 pub fn age_label(t_close_ms: u64) -> String {
     let now = SystemTime::now()

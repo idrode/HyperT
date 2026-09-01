@@ -44,6 +44,7 @@ fn extra_ttl(iv: Interval) -> Duration {
         Interval::H4 => 60,
         Interval::H12 => 120,
         Interval::D1 => 180,
+        Interval::W1 => 300,
     })
 }
 /// Debounce de peticiones extra en vuelo: evita re-encolar la misma petición
@@ -555,6 +556,9 @@ pub struct PairExtraData {
     /// Series del panel whales+RSI (Vista 3); `rsi`/`dmi` de arriba son sus
     /// últimos valores — un único cálculo de TA compartido con Vista 2.
     pub panel: signals::WhalePanel,
+    /// TRIX(18) alineado 1:1 con las velas (NaN = warmup). Confirmación
+    /// secundaria opcional en Vistas 2 y 3; no alimenta ningún disparo.
+    pub trix: Vec<f64>,
     pub fetched: Instant,
     /// Solo avanza cuando las velas realmente cambian: es la clave de caché de
     /// los paneles raster (Vistas 2 y 3) — un re-fetch periódico con datos
@@ -1123,6 +1127,72 @@ pub struct AgentUi {
     priv_hex: String,
 }
 
+/// Selección de indicadores del sub-panel TA de la Vista 2. Solo en memoria
+/// (se resetea cada sesión) — persistir a disco queda para cuando el usuario
+/// lo pida tras probarlo. `Copy` para poder leerla antes de los préstamos
+/// disjuntos de `App` en el render.
+#[derive(Debug, Clone, Copy)]
+pub struct IndSel {
+    pub rsi: bool,
+    pub adx_dmi: bool,
+    pub trix: bool,
+}
+
+impl Default for IndSel {
+    /// El set de siempre (RSI + ADX/DMI); TRIX apagado hasta que se active.
+    fn default() -> Self {
+        Self {
+            rsi: true,
+            adx_dmi: true,
+            trix: false,
+        }
+    }
+}
+
+impl IndSel {
+    /// Clave de invalidación del raster: la imagen debe re-rasterizarse si
+    /// cambia la selección aunque las velas (stamp) no hayan cambiado.
+    pub fn mask(&self) -> u64 {
+        (self.rsi as u64) | (self.adx_dmi as u64) << 1 | (self.trix as u64) << 2
+    }
+}
+
+/// Líneas visibles del panel de la Vista 3. Libertad total de VISUALIZACIÓN
+/// (decisión revertida respecto a la restricción original): las series del
+/// checklist se siguen calculando y mostrando en texto siempre — esto solo
+/// decide qué trazos van al raster. Las columnas y marcas ▲▼ de disparo no
+/// son una "línea" y se pintan siempre.
+#[derive(Debug, Clone, Copy)]
+pub struct Ind3Sel {
+    pub rsi_ma: bool,
+    /// %B (RSI Modificado).
+    pub mod_b: bool,
+    pub adx_dmi: bool,
+    pub trix: bool,
+}
+
+impl Default for Ind3Sel {
+    /// El stack clásico completo; TRIX apagado hasta que se active.
+    fn default() -> Self {
+        Self {
+            rsi_ma: true,
+            mod_b: true,
+            adx_dmi: true,
+            trix: false,
+        }
+    }
+}
+
+impl Ind3Sel {
+    /// Clave de invalidación del raster (como `IndSel::mask`).
+    pub fn mask(&self) -> u64 {
+        (self.rsi_ma as u64)
+            | (self.mod_b as u64) << 1
+            | (self.adx_dmi as u64) << 2
+            | (self.trix as u64) << 3
+    }
+}
+
 pub struct App {
     pub pairs: HashMap<String, PairState>,
     pub view: View,
@@ -1133,6 +1203,14 @@ pub struct App {
     pub heat_metric: HeatMetric,
     pub interval: Interval,
     pub show_help: bool,
+    /// Indicadores visibles del sub-panel TA de la Vista 2 (selector libre).
+    pub ind: IndSel,
+    /// Líneas visibles del panel de la Vista 3 (selector libre). SOLO afecta
+    /// al dibujo: el cálculo del panel de ballenas, el checklist textual y
+    /// las marcas ▲▼ corren SIEMPRE, se oculte lo que se oculte.
+    pub ind3: Ind3Sel,
+    /// Selector de indicadores abierto (Vistas 2 y 3): fila con el cursor.
+    pub ind_ui: Option<usize>,
     /// ¿El frame recién dibujado pintó algún overlay (ayuda, buscador, modal)?
     /// Lo marcan los propios sitios de dibujo (por eso `Cell`: varios reciben
     /// `&App`), y el bucle de `tui` lo usa para forzar un redibujado completo
@@ -1304,6 +1382,10 @@ pub struct TradeArm {
     pub master_fmt: String,
     /// Dirección pública del agent (solo informativa, para la UI).
     pub agent_addr: String,
+    /// Cuándo caduca la autorización del agent (epoch ms) — el panel deja de
+    /// poder operar al pasar esta fecha (las firmas fallan del lado del
+    /// servidor). None si el archivo de la clave no permitió calcularla.
+    pub agent_expires_ms: Option<u64>,
     tx: mpsc::UnboundedSender<TraderCmd>,
 }
 
@@ -1327,6 +1409,9 @@ impl App {
             heat_metric: HeatMetric::FundApr,
             interval: Interval::H1,
             show_help: false,
+            ind: IndSel::default(),
+            ind3: Ind3Sel::default(),
+            ind_ui: None,
             overlay_drawn: std::cell::Cell::new(false),
             ws_ok: false,
             last_ctx_at: None,
@@ -1538,11 +1623,13 @@ impl App {
                         &vols,
                         &signals::WhaleParams::default(),
                     );
+                    let trix = signals::trix_series(&closes, signals::TRIX_PERIOD);
                     p.extra = Some(PairExtraData {
                         interval,
                         rsi: panel.last_rsi(),
                         dmi: panel.last_dmi(),
                         panel,
+                        trix,
                         candles,
                         funding_hist,
                         fetched: Instant::now(),
@@ -2363,6 +2450,38 @@ impl App {
         self.request_extra(false);
     }
 
+    /// Filas del selector de indicadores según la vista. Libertad total en
+    /// ambas: en Vista 3 ocultar líneas NO apaga el cálculo del checklist ni
+    /// las marcas ▲▼ (solo afecta al dibujo del panel).
+    pub fn ind_rows(&self) -> usize {
+        match self.view {
+            View::WhaleRsi => 4,
+            _ => 3,
+        }
+    }
+
+    /// Teclado con el selector de indicadores abierto (Vistas 2 y 3).
+    fn handle_ind_key(&mut self, key: KeyEvent) {
+        let Some(sel) = self.ind_ui else { return };
+        let rows = self.ind_rows();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('q') => self.ind_ui = None,
+            KeyCode::Down | KeyCode::Char('j') => self.ind_ui = Some((sel + 1) % rows),
+            KeyCode::Up | KeyCode::Char('k') => self.ind_ui = Some((sel + rows - 1) % rows),
+            KeyCode::Enter | KeyCode::Char(' ') => match (self.view, sel) {
+                (View::WhaleRsi, 0) => self.ind3.rsi_ma = !self.ind3.rsi_ma,
+                (View::WhaleRsi, 1) => self.ind3.mod_b = !self.ind3.mod_b,
+                (View::WhaleRsi, 2) => self.ind3.adx_dmi = !self.ind3.adx_dmi,
+                (View::WhaleRsi, 3) => self.ind3.trix = !self.ind3.trix,
+                (_, 0) => self.ind.rsi = !self.ind.rsi,
+                (_, 1) => self.ind.adx_dmi = !self.ind.adx_dmi,
+                (_, 2) => self.ind.trix = !self.ind.trix,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
     /// Tab avanza en el orden numérico de las teclas 1-9.
     fn cycle_view(&mut self) {
         match self.view {
@@ -2405,12 +2524,14 @@ impl App {
         &mut self,
         master: Address,
         agent_addr: String,
+        agent_expires_ms: Option<u64>,
         tx: mpsc::UnboundedSender<TraderCmd>,
     ) {
         self.trade = Some(TradeArm {
             master,
             master_fmt: format!("{master}"),
             agent_addr,
+            agent_expires_ms,
             tx,
         });
         self.exec.real = true;
@@ -3822,6 +3943,12 @@ impl App {
             self.handle_search_key(key);
             return;
         }
+        // selector de indicadores (Vistas 2 y 3): captura el teclado mientras
+        // está abierto, como los demás modales
+        if self.ind_ui.is_some() && matches!(self.view, View::Pair | View::WhaleRsi) {
+            self.handle_ind_key(key);
+            return;
+        }
         // modales de depósito/retiro reales: por delante de todo lo demás
         if self.view == View::Funds && self.deposit_ui.is_some() {
             self.handle_deposit_key(key);
@@ -3941,6 +4068,7 @@ impl App {
                 KeyCode::Right | KeyCode::Char('l') => self.step_pair(1),
                 KeyCode::Char('i') => self.cycle_interval(),
                 KeyCode::Char('u') => self.request_extra(true),
+                KeyCode::Char('o') => self.ind_ui = Some(0),
                 _ => {}
             },
             View::Heatmap => match key.code {
@@ -4276,6 +4404,53 @@ mod tests {
             Gfx::new(),
         );
         (app, wallet_rx, usdc_rx, wc_rx)
+    }
+
+    /// Selector de indicadores (tecla o): en Vista 2 conmuta libremente los
+    /// tres; en Vista 3 SOLO conmuta TRIX (el stack core no es ocultable).
+    #[test]
+    fn selector_de_indicadores_por_vista() {
+        let (mut app, ..) = test_app();
+        app.view = View::Pair;
+        // defaults: el set de siempre encendido, TRIX apagado
+        assert!(app.ind.rsi && app.ind.adx_dmi && !app.ind.trix);
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.ind_ui, Some(0));
+        press(&mut app, KeyCode::Char(' ')); // apaga RSI
+        assert!(!app.ind.rsi);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter); // enciende TRIX (fila 2)
+        assert!(app.ind.trix && app.ind.adx_dmi);
+        // el ciclo de filas envuelve
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.ind_ui, Some(0));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.ind_ui, None);
+        // con el modal cerrado, o de nuevo lo reabre; la selección persiste
+        assert!(!app.ind.rsi && app.ind.trix);
+
+        // Vista 3: libertad total — 4 filas (RSI+MA, %B, ADX/±DI, TRIX)
+        app.view = View::WhaleRsi;
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.ind_rows(), 4);
+        press(&mut app, KeyCode::Enter); // fila 0: apaga RSI+MA (¡ahora se puede!)
+        assert!(!app.ind3.rsi_ma);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter); // fila 1: apaga %B
+        assert!(!app.ind3.mod_b);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter); // fila 2: apaga ADX/±DI
+        assert!(!app.ind3.adx_dmi);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter); // fila 3: enciende TRIX
+        assert!(app.ind3.trix, "TRIX de Vista 3 activado");
+        // el ciclo envuelve y la selección de Vista 2 no se toca
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.ind_ui, Some(0));
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.ind_ui, None);
+        assert!(!app.ind.rsi && app.ind.trix, "selección de Vista 2 intacta");
     }
 
     fn connect_on(app: &mut App, addr: &str, chain: &str) {
@@ -5008,7 +5183,7 @@ mod tests {
     /// Arma el trading real y devuelve el receptor de comandos del trader.
     fn arm(app: &mut App) -> mpsc::UnboundedReceiver<TraderCmd> {
         let (tx, rx) = mpsc::unbounded_channel();
-        app.arm_trading(MASTER.parse().unwrap(), "0xAGENTEagenteAGENTE".into(), tx);
+        app.arm_trading(MASTER.parse().unwrap(), "0xAGENTEagenteAGENTE".into(), None, tx);
         rx
     }
 

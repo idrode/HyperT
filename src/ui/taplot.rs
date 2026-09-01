@@ -5,6 +5,45 @@
 
 use ratatui::prelude::*;
 
+/// Reescala una serie centrada en 0 (TRIX) al eje 0-100 de los paneles de
+/// osciladores: 0 → 50, y el mayor |valor| finito de TODA la serie → ±45
+/// (queda dentro de la banda sin pisar los márgenes de las marcas ▲▼).
+/// Escala por la serie completa, no por la ventana visible, para que el trazo
+/// no "salte" al hacer scroll temporal. Devuelve también ese máximo, para que
+/// el hover/eje puedan traducir de vuelta al valor real.
+pub(super) fn scale_zero_centered(vals: &[f64]) -> (Vec<f64>, f64) {
+    let max = vals
+        .iter()
+        .filter(|v| v.is_finite())
+        .fold(0.0_f64, |m, v| m.max(v.abs()))
+        .max(1e-12);
+    let scaled = vals
+        .iter()
+        .map(|v| {
+            if v.is_finite() {
+                50.0 + 45.0 * v / max
+            } else {
+                f64::NAN
+            }
+        })
+        .collect();
+    (scaled, max)
+}
+
+#[cfg(test)]
+mod tests {
+    /// 0 → 50, ±máx → 50±45, NaN se preserva (warmup honesto).
+    #[test]
+    fn escala_centrada_en_cero() {
+        let (s, max) = super::scale_zero_centered(&[f64::NAN, -4.0, 0.0, 2.0]);
+        assert_eq!(max, 4.0);
+        assert!(s[0].is_nan());
+        assert_eq!(s[1], 5.0); // 50 − 45
+        assert_eq!(s[2], 50.0);
+        assert_eq!(s[3], 72.5); // 50 + 45·(2/4)
+    }
+}
+
 /// Índice (dentro de la ventana visible) del punto/vela bajo el cursor.
 /// `zone` es el área con borde del panel (o la unión de varios apilados:
 /// misma columna = misma vela); el eje de `axis_w` a la derecha queda fuera.

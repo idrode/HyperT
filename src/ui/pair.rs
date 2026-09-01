@@ -14,6 +14,7 @@ use super::whalersi::rsi_zone_color;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let mouse = app.mouse_pos;
+    let ind = app.ind;
     // el caché de imagen (gfx), el delta y el par se prestan por campos
     // disjuntos de App
     let gfx = &mut app.gfx;
@@ -67,7 +68,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .and_then(|e| taplot::hover_idx(mouse, mid_cols[0], AXIS_W, CANDLE_CELLS, e.candles.len()));
     draw_price_chart(f, p, hover, left[0]);
     if ta_h > 0 {
-        draw_ta_panel(f, p, gfx, hover, left[1]);
+        draw_ta_panel(f, p, gfx, hover, ind, left[1]);
     }
     if delta_h > 0 {
         let delta = delta.filter(|d| d.coin == p.meta.name);
@@ -386,19 +387,42 @@ fn draw_ta_panel(
     p: &PairState,
     gfx: &mut oscimg::Gfx,
     hover: Option<usize>,
+    ind: crate::app::IndSel,
     area: Rect,
 ) {
     let wp = WhaleParams::default();
-    let title = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("RSI", Style::new().fg(Color::Magenta)),
-        Span::styled(" · MA", Style::new().fg(Color::Yellow)),
-        Span::styled(" · ADX", Style::new().fg(Color::Gray)),
-        Span::styled(" · +DI", Style::new().fg(Color::Green)),
-        Span::styled(" · −DI", Style::new().fg(Color::Red)),
-        Span::raw(crate::i18n::t().pr_same_axis),
-    ]);
-    let mut block = Block::bordered().title(title);
+    // título según la selección (tecla o): solo lo que de verdad se pinta
+    let mut tspans = vec![Span::raw(" ")];
+    let sep = |v: &mut Vec<Span>| {
+        if v.len() > 1 {
+            v.push(Span::raw(" · "));
+        }
+    };
+    if ind.rsi {
+        tspans.push(Span::styled("RSI", Style::new().fg(Color::Magenta)));
+        tspans.push(Span::styled(" · MA", Style::new().fg(Color::Yellow)));
+    }
+    if ind.adx_dmi {
+        sep(&mut tspans);
+        tspans.push(Span::styled("ADX", Style::new().fg(Color::Gray)));
+        tspans.push(Span::styled(" · +DI", Style::new().fg(Color::Green)));
+        tspans.push(Span::styled(" · −DI", Style::new().fg(Color::Red)));
+    }
+    if ind.trix {
+        sep(&mut tspans);
+        tspans.push(Span::styled(
+            format!("TRIX({})", crate::signals::TRIX_PERIOD),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    if tspans.len() == 1 {
+        tspans.push(Span::styled(
+            crate::i18n::t().pr_ind_none.to_string(),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    tspans.push(Span::raw(crate::i18n::t().pr_same_axis));
+    let mut block = Block::bordered().title(Line::from(tspans));
     let Some(e) = &p.extra else {
         f.render_widget(
             Paragraph::new(crate::i18n::t().t_loading_candles).block(block),
@@ -423,6 +447,9 @@ fn draw_ta_panel(
     let axis = Rect::new(chart.right(), inner.y, AXIS_W, inner.height);
     let start = n.saturating_sub(max_vis_for(area.width));
     let panel = &e.panel;
+    // TRIX reescalado al eje 0-100 del panel (0→50, ±máx→±45); el hover y el
+    // eje traducen de vuelta al valor real
+    let (trix_scaled, _trix_max) = super::taplot::scale_zero_centered(&e.trix);
 
     // hora + valores de la vela bajo el cursor en el borde inferior
     if let Some(i) = hover.map(|h| start + h).filter(|i| *i < n) {
@@ -434,15 +461,28 @@ fn draw_ta_panel(
                 "—".to_string()
             }
         };
-        block = block.title_bottom(format!(
-            " {} · RSI {} · MA {} · ADX {} · +DI {} · −DI {} ",
-            time_label(e.candles[i].t_close),
-            num(panel.rsi[i]),
-            num(panel.rsi_ma[i]),
-            num(d.adx),
-            num(d.plus_di),
-            num(d.minus_di),
-        ));
+        let mut txt = format!(" {}", time_label(e.candles[i].t_close));
+        if ind.rsi {
+            txt += &format!(" · RSI {} · MA {}", num(panel.rsi[i]), num(panel.rsi_ma[i]));
+        }
+        if ind.adx_dmi {
+            txt += &format!(
+                " · ADX {} · +DI {} · −DI {}",
+                num(d.adx),
+                num(d.plus_di),
+                num(d.minus_di)
+            );
+        }
+        if ind.trix {
+            let v = e.trix[i];
+            txt += &if v.is_finite() {
+                format!(" · TRIX {v:+.1}")
+            } else {
+                " · TRIX —".to_string()
+            };
+        }
+        txt.push(' ');
+        block = block.title_bottom(txt);
     }
     f.render_widget(block, area);
 
@@ -450,8 +490,46 @@ fn draw_ta_panel(
     let pdi: Vec<f64> = panel.dmi.iter().map(|d| d.plus_di).collect();
     let mdi: Vec<f64> = panel.dmi.iter().map(|d| d.minus_di).collect();
     // imagen real compartida con la Vista 3 (oscimg): niveles 30/50/70 y banda
-    // van dentro del raster; re-rasteriza solo si cambian datos o tamaño
+    // van dentro del raster; re-rasteriza solo si cambian datos, selección
+    // (tecla o → ind.mask() como clave) o tamaño
     let zone = |v: f64| oscimg::rsi_zone_rgb(v, &wp);
+    let mut lines = Vec::new();
+    if ind.adx_dmi {
+        lines.push(OscLine {
+            vals: &adx,
+            width: 1,
+            color: LineColor::Fixed(oscimg::GRAY),
+        });
+        lines.push(OscLine {
+            vals: &pdi,
+            width: 1,
+            color: LineColor::Fixed(oscimg::GREEN),
+        });
+        lines.push(OscLine {
+            vals: &mdi,
+            width: 1,
+            color: LineColor::Fixed(oscimg::RED),
+        });
+    }
+    if ind.trix {
+        lines.push(OscLine {
+            vals: &trix_scaled,
+            width: if ind.rsi { 1 } else { 2 },
+            color: LineColor::Fixed(oscimg::CYAN),
+        });
+    }
+    if ind.rsi {
+        lines.push(OscLine {
+            vals: &panel.rsi_ma,
+            width: 1,
+            color: LineColor::Fixed(oscimg::YELLOW),
+        });
+        lines.push(OscLine {
+            vals: &panel.rsi,
+            width: 2,
+            color: LineColor::ByValue(&zone),
+        });
+    }
     let spec = OscSpec {
         start,
         len: n - start,
@@ -459,37 +537,19 @@ fn draw_ta_panel(
         half_cols: 0.5,
         oversold: wp.oversold,
         overbought: wp.overbought,
-        lines: vec![
-            OscLine {
-                vals: &adx,
-                width: 1,
-                color: LineColor::Fixed(oscimg::GRAY),
-            },
-            OscLine {
-                vals: &pdi,
-                width: 1,
-                color: LineColor::Fixed(oscimg::GREEN),
-            },
-            OscLine {
-                vals: &mdi,
-                width: 1,
-                color: LineColor::Fixed(oscimg::RED),
-            },
-            OscLine {
-                vals: &panel.rsi_ma,
-                width: 1,
-                color: LineColor::Fixed(oscimg::YELLOW),
-            },
-            OscLine {
-                vals: &panel.rsi,
-                width: 2,
-                color: LineColor::ByValue(&zone),
-            },
-        ],
+        lines,
         bars: vec![],
         marks: vec![],
     };
-    oscimg::draw_into(f, chart, gfx, oscimg::OscSlot::PairTa, e.stamp, spec);
+    oscimg::draw_into(
+        f,
+        chart,
+        gfx,
+        oscimg::OscSlot::PairTa,
+        e.stamp,
+        ind.mask(),
+        spec,
+    );
 
     // eje 0-100 compacto: niveles + RSI actual resaltado
     let h = axis.height as usize;
@@ -506,13 +566,15 @@ fn draw_ta_panel(
     ] {
         labels[row_of(v)] = Line::from(Span::styled(format!("{v:.0}"), Style::new().fg(c)));
     }
-    if let Some(r) = panel.last_rsi() {
-        labels[row_of(r)] = Line::from(Span::styled(
-            format!("▶{r:.0}"),
-            Style::new()
-                .fg(rsi_zone_color(r, &wp))
-                .add_modifier(Modifier::BOLD),
-        ));
+    if ind.rsi {
+        if let Some(r) = panel.last_rsi() {
+            labels[row_of(r)] = Line::from(Span::styled(
+                format!("▶{r:.0}"),
+                Style::new()
+                    .fg(rsi_zone_color(r, &wp))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     f.render_widget(Paragraph::new(labels), axis);
 }

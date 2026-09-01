@@ -25,6 +25,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             area,
         );
     };
+    let ind3 = app.ind3;
     // el caché de imagen (gfx) y el par se prestan por campos disjuntos de App
     let gfx = &mut app.gfx;
     let Some(p) = app.selected_coin.as_deref().and_then(|c| app.pairs.get(c)) else {
@@ -52,7 +53,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     // aunque este panel sea más estrecho (el trazo se escala al ancho)
     let win = pair::visible_candles(area);
     let hover = taplot::hover_idx_scaled(app.mouse_pos, cols[0], AXIS_W, win, e.candles.len());
-    draw_chart(f, e, gfx, hover, win, cols[0]);
+    draw_chart(f, e, gfx, hover, win, ind3, cols[0]);
     draw_log(f, e, cols[1]);
 }
 
@@ -226,6 +227,7 @@ fn draw_chart(
     gfx: &mut oscimg::Gfx,
     hover: Option<usize>,
     win: usize,
+    ind3: crate::app::Ind3Sel,
     area: Rect,
 ) {
     let wp = WhaleParams::default();
@@ -233,10 +235,27 @@ fn draw_chart(
     let n = e.candles.len();
     // misma ventana visible que la Vista 2 (win velas), no una propia
     let start = n.saturating_sub(win);
+    // título según las líneas visibles (tecla o). Las marcas ▲▼ van siempre:
+    // son el disparo de la vista, no una línea ocultable.
+    let mut parts: Vec<&str> = Vec::new();
+    if ind3.rsi_ma {
+        parts.push("RSI · MA");
+    }
+    if ind3.mod_b {
+        parts.push("%B");
+    }
+    if ind3.adx_dmi {
+        parts.push("ADX/±DI");
+    }
+    if ind3.trix {
+        parts.push("TRIX");
+    }
+    parts.push("▲▼ ballena");
     let mut block = Block::bordered().title(format!(
-        " whales+RSI {} ×{} — RSI · MA · %B · ADX/±DI · ▲▼ ballena — i cambia TF ",
+        " whales+RSI {} ×{} — {} — i cambia TF · o indicadores ",
         e.interval.label(),
         n - start,
+        parts.join(" · "),
     ));
     let inner = block.inner(area);
     if inner.width < AXIS_W + 10 || inner.height < 4 {
@@ -259,8 +278,20 @@ fn draw_chart(
                 "—".to_string()
             }
         };
+        // el hover es texto: muestra SIEMPRE los valores del checklist,
+        // estén o no dibujadas sus líneas (solo TRIX es opcional aquí)
+        let trix_txt = if ind3.trix {
+            let v = e.trix[i];
+            if v.is_finite() {
+                format!(" · TRIX {v:+.1}")
+            } else {
+                " · TRIX —".to_string()
+            }
+        } else {
+            String::new()
+        };
         block = block.title_bottom(format!(
-            " {} · RSI {} · MA {} · %B {} · ADX {} · +DI {} · −DI {} ",
+            " {} · RSI {} · MA {} · %B {} · ADX {} · +DI {} · −DI {}{trix_txt} ",
             time_label(e.candles[i].t_close),
             num(panel.rsi[i]),
             num(panel.rsi_ma[i]),
@@ -279,51 +310,72 @@ fn draw_chart(
     // imagen real compartida con el sub-panel de la Vista 2 (oscimg): niveles,
     // columnas de ballena y marcas ▲▼ van dentro del raster. ADX/DMI debajo,
     // %B y MA encima, RSI al final (queda por encima de todo), como el Pine.
-    let mut lines = vec![
-        OscLine {
+    // solo las líneas SELECCIONADAS van al raster (tecla o) — las series se
+    // calculan siempre igualmente: checklist, log y ▲▼ no dependen de esto
+    let mut lines = Vec::new();
+    if ind3.adx_dmi {
+        lines.push(OscLine {
             vals: &adx,
             width: 1,
             color: LineColor::Fixed(oscimg::GRAY),
-        },
-        OscLine {
+        });
+        lines.push(OscLine {
             vals: &pdi,
             width: 1,
             color: LineColor::Fixed(oscimg::GREEN),
-        },
-        OscLine {
+        });
+        lines.push(OscLine {
             vals: &mdi,
             width: 1,
             color: LineColor::Fixed(oscimg::RED),
-        },
-    ];
-    if let Some((up, lo)) = &panel.rsi_bb {
-        lines.push(OscLine {
-            vals: up,
-            width: 1,
-            color: LineColor::Fixed(oscimg::DIM_GREEN),
         });
+    }
+    if ind3.rsi_ma {
+        if let Some((up, lo)) = &panel.rsi_bb {
+            lines.push(OscLine {
+                vals: up,
+                width: 1,
+                color: LineColor::Fixed(oscimg::DIM_GREEN),
+            });
+            lines.push(OscLine {
+                vals: lo,
+                width: 1,
+                color: LineColor::Fixed(oscimg::DIM_GREEN),
+            });
+        }
+    }
+    // TRIX opcional, reescalado al eje 0-100 (0→50): debajo de %B/MA/RSI para
+    // no competir visualmente con el stack del checklist
+    let trix_scaled = ind3
+        .trix
+        .then(|| super::taplot::scale_zero_centered(&e.trix).0);
+    if let Some(ts) = &trix_scaled {
         lines.push(OscLine {
-            vals: lo,
+            vals: ts,
             width: 1,
-            color: LineColor::Fixed(oscimg::DIM_GREEN),
+            color: LineColor::Fixed(oscimg::CYAN),
         });
     }
     let zone = |v: f64| oscimg::rsi_zone_rgb(v, &wp);
-    lines.push(OscLine {
-        vals: &panel.mod_rsi,
-        width: 1,
-        color: LineColor::Fixed(oscimg::BLUE),
-    });
-    lines.push(OscLine {
-        vals: &panel.rsi_ma,
-        width: 1,
-        color: LineColor::Fixed(oscimg::YELLOW),
-    });
-    lines.push(OscLine {
-        vals: &panel.rsi,
-        width: 2,
-        color: LineColor::ByValue(&zone),
-    });
+    if ind3.mod_b {
+        lines.push(OscLine {
+            vals: &panel.mod_rsi,
+            width: 1,
+            color: LineColor::Fixed(oscimg::BLUE),
+        });
+    }
+    if ind3.rsi_ma {
+        lines.push(OscLine {
+            vals: &panel.rsi_ma,
+            width: 1,
+            color: LineColor::Fixed(oscimg::YELLOW),
+        });
+        lines.push(OscLine {
+            vals: &panel.rsi,
+            width: 2,
+            color: LineColor::ByValue(&zone),
+        });
+    }
     let bars = panel
         .triggers
         .iter()
@@ -351,7 +403,15 @@ fn draw_chart(
         bars,
         marks,
     };
-    oscimg::draw_into(f, chart, gfx, oscimg::OscSlot::WhaleRsi, e.stamp, spec);
+    oscimg::draw_into(
+        f,
+        chart,
+        gfx,
+        oscimg::OscSlot::WhaleRsi,
+        e.stamp,
+        ind3.mask(),
+        spec,
+    );
 
     // eje 0-100 con los niveles y el RSI actual resaltado
     let h = axis.height as usize;
@@ -370,15 +430,210 @@ fn draw_chart(
     ] {
         labels[row_of(v)] = Line::from(Span::styled(format!("{v:.0}"), Style::new().fg(c)));
     }
-    if let Some(r) = panel.last_rsi() {
-        labels[row_of(r)] = Line::from(Span::styled(
-            format!("▶{r:.0}"),
-            Style::new()
-                .fg(rsi_zone_color(r, &wp))
-                .add_modifier(Modifier::BOLD),
-        ));
+    // el marcador ▶ del eje acompaña a la LÍNEA de RSI: sin ella no señala
+    // nada (el valor sigue siempre visible en el resumen y el hover)
+    if ind3.rsi_ma {
+        if let Some(r) = panel.last_rsi() {
+            labels[row_of(r)] = Line::from(Span::styled(
+                format!("▶{r:.0}"),
+                Style::new()
+                    .fg(rsi_zone_color(r, &wp))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     f.render_widget(Paragraph::new(labels), axis);
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use crate::app::App;
+    use crate::data::types::{CandlePoint, CtxSnapshot, DataMsg, Interval, PairMeta};
+    use std::time::Instant;
+
+    /// App con BTC seleccionado y ~90 velas sintéticas cargadas (vía el mismo
+    /// DataMsg::PairExtra del camino real), en Vista 3, sin tty (halfblocks).
+    fn app_vista3() -> App {
+        std::env::set_var("CHART_PROTO", "halfblocks");
+        let (extra_tx, _extra) = tokio::sync::mpsc::channel(8);
+        let (wallet_tx, _w) = tokio::sync::watch::channel(Vec::new());
+        let (usdc_tx, _u) = tokio::sync::watch::channel(None);
+        let (coin_tx, _c) = tokio::sync::watch::channel(None);
+        let (wc_tx, _wc) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            extra_tx,
+            wallet_tx,
+            usdc_tx,
+            coin_tx,
+            wc_tx,
+            "test",
+            super::oscimg::Gfx::new(),
+        );
+        let meta = PairMeta {
+            name: "BTC".into(),
+            sz_decimals: 5,
+            max_leverage: 40,
+        };
+        let snap = CtxSnapshot {
+            t: Instant::now(),
+            t_ms: 0,
+            mark_px: 100_000.0,
+            mid_px: Some(100_000.0),
+            oracle_px: 100_000.0,
+            funding: 0.0,
+            open_interest: 0.0,
+            premium: None,
+            day_ntl_vlm: 0.0,
+            prev_day_px: 100_000.0,
+        };
+        app.apply_msg(DataMsg::Ctxs(vec![(meta, snap)]));
+        app.selected_coin = Some("BTC".into());
+        let candles: Vec<CandlePoint> = (0..90)
+            .map(|i| {
+                let base = 100_000.0 + 800.0 * (i as f64 * 0.35).sin();
+                CandlePoint {
+                    t_close: 60_000 * (i as u64 + 1),
+                    open: base,
+                    high: base + 120.0,
+                    low: base - 120.0,
+                    close: base + 40.0,
+                    volume: 1.0,
+                }
+            })
+            .collect();
+        app.apply_msg(DataMsg::PairExtra {
+            coin: "BTC".into(),
+            interval: Interval::M1,
+            candles,
+            funding_hist: vec![],
+        });
+        app.view = crate::app::View::WhaleRsi;
+        app
+    }
+
+    fn frame(term: &mut Terminal<TestBackend>, app: &mut App) -> String {
+        term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    /// EVIDENCIA del bug reportado (panel no se actualiza tras cerrar el
+    /// selector): reproduce la secuencia exacta de teclas y verifica que la
+    /// clave de invalidación dispara un re-raster en el frame siguiente al
+    /// toggle, y que el título del panel refleja el cambio tras cerrar.
+    #[test]
+    fn toggle_del_selector_re_rasteriza_el_panel() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        use std::sync::atomic::Ordering;
+
+        let mut app = app_vista3();
+        let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        let s0 = frame(&mut term, &mut app);
+        assert!(
+            !s0.contains("· TRIX ·"),
+            "TRIX apagado por defecto:\n{s0}"
+        );
+        let n0 = super::oscimg::RASTER_COUNT.load(Ordering::SeqCst);
+        // frame idéntico: el caché debe aguantar (0 rasters nuevos)
+        frame(&mut term, &mut app);
+        assert_eq!(
+            super::oscimg::RASTER_COUNT.load(Ordering::SeqCst),
+            n0,
+            "sin cambios no debe re-rasterizar"
+        );
+
+        // secuencia del usuario: o abre, ↓↓↓ hasta TRIX (fila 3), Enter
+        // conmuta, Esc cierra
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        frame(&mut term, &mut app); // frame con el modal abierto
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let s_modal = frame(&mut term, &mut app);
+        let n_after_toggle = super::oscimg::RASTER_COUNT.load(Ordering::SeqCst);
+        assert!(
+            n_after_toggle > n0,
+            "la clave de invalidación (selección) debe disparar re-raster \
+             en el frame siguiente al toggle, aún con el modal abierto"
+        );
+        assert!(s_modal.contains("[x]"), "checkbox marcado:\n{s_modal}");
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        let s1 = frame(&mut term, &mut app);
+        assert!(
+            s1.contains("· TRIX ·"),
+            "el título del panel debe reflejar TRIX tras cerrar:\n{s1}"
+        );
+        // y desactivarlo vuelve a invalidar (k vuelve a la fila de TRIX
+        // porque el cursor se resetea al abrir: ↑ desde 0 envuelve a 3)
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        let s2 = frame(&mut term, &mut app);
+        assert!(!s2.contains("· TRIX ·"), "toggle de vuelta:\n{s2}");
+        assert!(
+            super::oscimg::RASTER_COUNT.load(Ordering::SeqCst) > n_after_toggle,
+            "apagarlo también re-rasteriza"
+        );
+    }
+
+    /// Garantía de la libertad total en Vista 3: con TODAS las líneas del
+    /// panel ocultas, el checklist de condiciones, el log de disparos y las
+    /// marcas ▲▼ siguen calculándose y mostrándose en texto — la selección
+    /// solo decide qué trazos van al raster, nunca apaga la lógica.
+    #[test]
+    fn ocultar_todas_las_lineas_no_apaga_checklist_ni_disparos() {
+        let mut app = app_vista3();
+        let triggers_antes = app
+            .selected_coin
+            .as_deref()
+            .and_then(|c| app.pairs.get(c))
+            .and_then(|p| p.extra.as_ref())
+            .map(|e| e.panel.triggers.len())
+            .unwrap();
+        app.ind3.rsi_ma = false;
+        app.ind3.mod_b = false;
+        app.ind3.adx_dmi = false;
+        app.ind3.trix = false;
+        let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        let s = frame(&mut term, &mut app);
+        // checklist textual de los 5 filtros por lado, intacto
+        assert!(s.contains("▲ long"), "checklist long presente:\n{s}");
+        assert!(s.contains("▼ short"), "checklist short presente:\n{s}");
+        assert!(s.contains("RSI<40"), "condición RSI del checklist:\n{s}");
+        assert!(s.contains("ADX<28"), "condición ADX del checklist:\n{s}");
+        // resumen con los valores numéricos (RSI/MA/%B/ADX/±DI) sigue ahí
+        assert!(s.contains("RSI "), "valores del resumen:\n{s}");
+        // log de disparos con su recuento real (el cálculo no se apagó)
+        assert!(
+            s.contains(&format!("Disparos ballena — {triggers_antes} en")),
+            "log de disparos con recuento {triggers_antes}:\n{s}"
+        );
+        // y las marcas ▲▼ siguen yendo al raster aunque no haya líneas
+        let p = app
+            .selected_coin
+            .as_deref()
+            .and_then(|c| app.pairs.get(c))
+            .unwrap();
+        assert_eq!(
+            p.extra.as_ref().unwrap().panel.triggers.len(),
+            triggers_antes,
+            "los triggers no dependen de la selección"
+        );
+        // el título del panel mantiene ▲▼ (nunca es ocultable)
+        assert!(s.contains("▲▼ ballena"), "marcas siempre en el título:\n{s}");
+    }
 }
 
 fn draw_log(f: &mut Frame, e: &PairExtraData, area: Rect) {

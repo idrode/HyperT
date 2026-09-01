@@ -556,7 +556,7 @@ fn draw_agent_modal(f: &mut Frame, app: &mut App) {
     let tr = crate::i18n::t();
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let mut hits: Vec<(Rect, Hit)> = Vec::new();
-    let area = super::exec::centered(78, 16, f.area());
+    let area = super::exec::centered(78, 17, f.area());
     f.render_widget(Clear, area);
     let block = Block::bordered()
         .title(tr.fu_ag_modal_title.replacen("{}", route.hl_chain, 1))
@@ -595,14 +595,34 @@ fn draw_agent_modal(f: &mut Frame, app: &mut App) {
             ),
             Style::new().fg(Color::Gray),
         ),
+        kv(
+            tr.fu_kv_validity,
+            tr.fu_ag_validity_val.replacen(
+                "{}",
+                &super::fmt::date_label(agent_expiry_preview()),
+                1,
+            ),
+            Style::new().fg(Color::Gray),
+        ),
         replaces,
         Line::raw(""),
         Line::from(dim(tr.fu_gasless1)),
         Line::from(dim(tr.fu_ag_gasless2)),
     ];
     f.render_widget(Paragraph::new(lines), inner);
-    super::exec::modal_buttons(f, inner, 13, tr.fu_btn_sign, &mut hits);
+    super::exec::modal_buttons(f, inner, 14, tr.fu_btn_sign, &mut hits);
     app.exec.hits.extend(hits);
+}
+
+/// Expiración APROXIMADA que tendrá el agent si se firma ahora (ahora + 180d).
+/// Solo para el resumen del modal — la exacta se fija con el nonce de la
+/// firma y queda persistida en el JSON de la clave.
+fn agent_expiry_preview() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    now + crate::wallet::agent::MAX_AGENT_TTL_MS
 }
 
 /// Modal del retiro real (paso 5): cantidad → resumen con la dirección de
@@ -1145,6 +1165,11 @@ mod tests {
             "falta el botón de firma:\n{s}"
         );
 
+        assert!(
+            s.contains("180 days"),
+            "falta la vigencia (valid_until de 180 días):\n{s}"
+        );
+
         // fases en la tira: verificado con su ruta
         app.agent_ui = None;
         app.apply_msg(DataMsg::Agent(AgentStatus::Verified {
@@ -1356,6 +1381,15 @@ mod tests {
                 .parse()
                 .unwrap(),
             "0xAGENTEagenteAGENTEagente".into(),
+            // expiración a ~3 días vista: debe pintarse el aviso de caducidad
+            Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+                    + 3 * 86_400_000
+                    + 3_600_000,
+            ),
             trade_tx,
         );
         let master = app.trade.as_ref().unwrap().master_fmt.clone();
@@ -1412,6 +1446,11 @@ mod tests {
         );
         // la posición real pintada con su liq exacta de la API
         assert!(s.contains("90500"), "falta la liq real:\n{s}");
+        // a 3 días de la expiración: aviso visible en la línea de estado
+        assert!(
+            s.contains("key EXPIRES") && s.contains("(3d left)"),
+            "falta el aviso de expiración del agent:\n{s}"
+        );
     }
 
     /// El paso de cantidad avisa del mínimo del bridge, y las fases del

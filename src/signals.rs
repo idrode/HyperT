@@ -219,6 +219,36 @@ fn smoothed(values: &[f64], period: usize, alpha: f64) -> Vec<f64> {
     out
 }
 
+/// Periodo por defecto del TRIX — el del Pine Script fuente (18, no 15).
+pub const TRIX_PERIOD: usize = 18;
+
+/// TRIX, fórmula EXACTA del Pine fuente (v6):
+/// `10000 * ta.change(ta.ema(ta.ema(ta.ema(math.log(close), len), len), len))`
+/// — triple EMA sobre el LOGARITMO NATURAL del cierre (no el precio crudo), y
+/// `ta.change` con longitud 1 = diferencia simple (no porcentual: el log ya
+/// aporta el efecto porcentual), escalada ×10000. Cada EMA arranca con seed
+/// SMA sobre su primera ventana completa (semántica de `smoothed`, la misma
+/// del RSI/MA ya portados). NaN durante el warmup. Oscila alrededor de 0:
+/// positivo = momentum alcista.
+pub fn trix_series(closes: &[f64], period: usize) -> Vec<f64> {
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let logc: Vec<f64> = closes
+        .iter()
+        .map(|c| if *c > 0.0 { c.ln() } else { f64::NAN })
+        .collect();
+    let e1 = smoothed(&logc, period, alpha);
+    let e2 = smoothed(&e1, period, alpha);
+    let e3 = smoothed(&e2, period, alpha);
+    let n = closes.len();
+    let mut out = vec![f64::NAN; n];
+    for i in 1..n {
+        if e3[i].is_finite() && e3[i - 1].is_finite() {
+            out[i] = 10000.0 * (e3[i] - e3[i - 1]);
+        }
+    }
+    out
+}
+
 /// Tipos de MA del selector del Pine para la media del RSI. Solo Sma se
 /// construye con los defaults; el resto es superficie configurable del port.
 #[allow(dead_code)]
@@ -567,6 +597,68 @@ mod tests {
         let panel = whale_panel(&highs, &lows, &closes, &vols, &WhaleParams::default());
         assert_eq!(panel.last_rsi(), Some(r[79]));
         assert_eq!(panel.last_dmi().unwrap().adx, d[79].adx);
+    }
+
+    /// Caso numérico CONOCIDO en forma cerrada: si el cierre crece
+    /// exponencialmente (`close = 100·e^(0.01·i)`), `log(close)` es una recta
+    /// de pendiente 0.01. Una EMA con seed SMA sobre una recta es EXACTAMENTE
+    /// la recta desplazada por su lag ((p−1)/2 · pendiente): el seed cae en el
+    /// punto medio de la ventana y la recursión preserva el desfase (se
+    /// comprueba algebraicamente: (1−α)/α = (p−1)/2). El triple EMA sigue
+    /// siendo una recta con pendiente 0.01, así que la diferencia simple por
+    /// vela es 0.01 y TRIX = 10000 × 0.01 = 100 exacto — verificable a mano
+    /// sin depender de una implementación de referencia.
+    #[test]
+    fn trix_recta_exponencial_valor_exacto() {
+        let closes: Vec<f64> = (0..120).map(|i| 100.0 * (0.01 * i as f64).exp()).collect();
+        let t = trix_series(&closes, 18);
+        for v in &t[60..] {
+            assert!((v - 100.0).abs() < 1e-8, "TRIX debería ser 100 exacto: {v}");
+        }
+        // precio constante → log constante → triple EMA constante → TRIX 0
+        let flat = vec![250.0; 120];
+        let tf = trix_series(&flat, 18);
+        assert!(tf[119].abs() < 1e-12);
+    }
+
+    /// Caso pequeño calculado A MANO paso a paso (periodo 2, α=2/3, seed SMA):
+    /// closes [1,2,3,4,5] → log [0, .693147, 1.098612, 1.386294, 1.609438].
+    /// e1: seed(1)=.346574, e1(2)=.847298, e1(3)=1.206629, e1(4)=1.475168.
+    /// e2: seed(2)=.596936, e2(3)=1.003398, e2(4)=1.317912.
+    /// e3: seed(3)=.800167, e3(4)=1.145330.
+    /// TRIX(4) = 10000·(e3(4)−e3(3)) = 3450.6121…
+    #[test]
+    fn trix_caso_a_mano() {
+        let closes = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let t = trix_series(&closes, 2);
+        assert!(t[..4].iter().all(|v| v.is_nan()), "warmup honesto");
+        let ln = |x: f64| x.ln();
+        let a = 2.0 / 3.0;
+        let e1_1 = (ln(1.0) + ln(2.0)) / 2.0;
+        let e1_2 = a * ln(3.0) + (1.0 - a) * e1_1;
+        let e1_3 = a * ln(4.0) + (1.0 - a) * e1_2;
+        let e1_4 = a * ln(5.0) + (1.0 - a) * e1_3;
+        let e2_2 = (e1_1 + e1_2) / 2.0;
+        let e2_3 = a * e1_3 + (1.0 - a) * e2_2;
+        let e2_4 = a * e1_4 + (1.0 - a) * e2_3;
+        let e3_3 = (e2_2 + e2_3) / 2.0;
+        let e3_4 = a * e2_4 + (1.0 - a) * e3_3;
+        let want = 10000.0 * (e3_4 - e3_3);
+        assert!((t[4] - want).abs() < 1e-9);
+        assert!((want - 3450.6121).abs() < 1e-3, "referencia a mano: {want}");
+    }
+
+    /// Warmup del TRIX(18): 3 EMAs encadenadas con seed SMA + 1 vela de la
+    /// diferencia → primer valor finito en el índice 3·(p−1)+1.
+    #[test]
+    fn trix_warmup_alignment() {
+        let closes: Vec<f64> = (0..120).map(|i| 100.0 + (i as f64 * 0.3).sin()).collect();
+        let t = trix_series(&closes, 18);
+        let first = 3 * 17 + 1;
+        assert!(t[..first].iter().all(|v| v.is_nan()));
+        assert!(t[first..].iter().all(|v| v.is_finite()));
+        // precios no positivos no revientan: NaN honesto
+        assert!(trix_series(&[0.0; 40], 18).iter().all(|v| v.is_nan()));
     }
 
     #[test]

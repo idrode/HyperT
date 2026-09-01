@@ -374,11 +374,27 @@ fn transfer_action(req: &TransferReq, nonce: u64) -> Value {
     })
 }
 
+/// Expiración explícita del agent: el máximo del protocolo (180 días) desde
+/// el momento de la firma. Determinista a partir del nonce (que ya es el
+/// epoch ms del momento de firmar) para que typed data, action y el JSON
+/// persistido calculen EXACTAMENTE el mismo valor sin arrastrarlo aparte.
+fn agent_valid_until(nonce: u64) -> u64 {
+    nonce + crate::wallet::agent::MAX_AGENT_TTL_MS
+}
+
+/// Nombre del agent con expiración embebida, formato del protocolo:
+/// `<nombre> valid_until <epoch_ms>`. Nombre constante ("hypert") para que
+/// cada reautorización reemplace al agent anterior de esta app, igual que
+/// hacía el agent sin nombre.
+fn agent_name(nonce: u64) -> String {
+    format!("hypert valid_until {}", agent_valid_until(nonce))
+}
+
 /// Typed data EIP-712 de la autorización del agent (paso 6). Formato
 /// contrastado contra `ApproveAgent` del SDK pineado (test
-/// `agent_typed_data_hash_sdk`). `agentName` va como string vacío: es lo que
-/// el SDK hashea para su `None` (agent sin nombre — el que se reemplaza al
-/// rotar). Se envía como STRING JSON (params[1] de eth_signTypedData_v4).
+/// `agent_typed_data_hash_sdk`). `agentName` lleva la expiración explícita
+/// (`valid_until`, máx. 180d) — sin ella el protocolo caduca el agent a los
+/// 90 días. Se envía como STRING JSON (params[1] de eth_signTypedData_v4).
 fn agent_typed_data(req: &AgentReq, nonce: u64) -> String {
     json!({
         "types": {
@@ -405,7 +421,7 @@ fn agent_typed_data(req: &AgentReq, nonce: u64) -> String {
         "message": {
             "hyperliquidChain": req.hl_chain,
             "agentAddress": req.agent_address,
-            "agentName": "",
+            "agentName": agent_name(nonce),
             "nonce": nonce,
         },
     })
@@ -414,14 +430,15 @@ fn agent_typed_data(req: &AgentReq, nonce: u64) -> String {
 
 /// Action `approveAgent` del POST a /exchange, idéntico al que serializa el
 /// SDK (test `agent_action_identico_al_sdk`): dirección en hex minúsculas,
-/// `agentName` null para el agent sin nombre, signatureChainId en hex.
+/// `agentName` EXACTAMENTE el string firmado (con su `valid_until`),
+/// signatureChainId en hex.
 fn agent_action(req: &AgentReq, nonce: u64) -> Value {
     json!({
         "type": "approveAgent",
         "signatureChainId": format!("0x{:x}", req.chain_id),
         "hyperliquidChain": req.hl_chain,
         "agentAddress": req.agent_address.to_lowercase(),
-        "agentName": Value::Null,
+        "agentName": agent_name(nonce),
         "nonce": nonce,
     })
 }
@@ -1160,6 +1177,7 @@ async fn submit_agent(
         &req.agent_address,
         &req.agent_priv,
         nonce,
+        agent_valid_until(nonce),
     ) {
         // sin persistencia garantizada NO se autoriza: una clave solo en
         // memoria se perdería con la app y dejaría un agent inutilizable
@@ -1954,8 +1972,8 @@ mod tests {
 
     /// LA garantía del paso 6: lo que MetaMask firmará (nuestro typed data de
     /// approveAgent) produce EXACTAMENTE el mismo hash EIP-712 que el
-    /// `ApproveAgent` del SDK oficial pineado, en ambas redes — incluida la
-    /// equivalencia agentName "" (nuestro JSON) ↔ None (el SDK).
+    /// `ApproveAgent` del SDK oficial pineado, en ambas redes — con el
+    /// agentName con `valid_until` embebido (Some en el SDK).
     #[test]
     fn agent_typed_data_hash_sdk() {
         use hyperliquid_rust_sdk::{ApproveAgent, Eip712};
@@ -1968,7 +1986,7 @@ mod tests {
                 signature_chain_id: chain_id,
                 hyperliquid_chain: hl_chain.to_string(),
                 agent_address: req.agent_address.parse().unwrap(),
-                agent_name: None,
+                agent_name: Some(agent_name(nonce)),
                 nonce,
             };
             assert_eq!(
@@ -1980,8 +1998,8 @@ mod tests {
     }
 
     /// El action del POST es EXACTAMENTE el que serializa el SDK (tag
-    /// `approveAgent`, agentName null, signatureChainId en hex, dirección
-    /// en minúsculas como la serde de alloy).
+    /// `approveAgent`, agentName con `valid_until` embebido, signatureChainId
+    /// en hex, dirección en minúsculas como la serde de alloy).
     #[test]
     fn agent_action_identico_al_sdk() {
         use hyperliquid_rust_sdk::{Actions, ApproveAgent};
@@ -1991,13 +2009,24 @@ mod tests {
             signature_chain_id: 421_614,
             hyperliquid_chain: "Testnet".to_string(),
             agent_address: req.agent_address.parse().unwrap(),
-            agent_name: None,
+            agent_name: Some(agent_name(nonce)),
             nonce,
         }))
         .unwrap();
         assert_eq!(agent_action(&req, nonce), sdk);
         assert_eq!(sdk["type"].as_str(), Some("approveAgent"));
-        assert!(sdk["agentName"].is_null());
+        assert_eq!(sdk["agentName"].as_str(), Some(agent_name(nonce).as_str()));
+    }
+
+    /// El nombre firmado lleva la expiración en el formato del protocolo
+    /// (`valid_until <epoch_ms>`) y esta es nonce + 180 días exactos — el
+    /// máximo que Hyperliquid acepta.
+    #[test]
+    fn agent_name_lleva_valid_until_maximo() {
+        let nonce = 1_716_531_066_415u64;
+        let until = agent_valid_until(nonce);
+        assert_eq!(until - nonce, 180 * 24 * 60 * 60 * 1000);
+        assert_eq!(agent_name(nonce), format!("hypert valid_until {until}"));
     }
 
     fn transfer_req_de_prueba(chain_id: u64, hl_chain: &'static str, to_perp: bool) -> TransferReq {

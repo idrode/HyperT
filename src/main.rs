@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     if let Some(agent) = agent {
         let (trade_tx, trade_rx) = mpsc::unbounded_channel();
         data::spawn_orders_watcher(base, tx.clone(), agent.master);
-        app.arm_trading(agent.master, agent.address.clone(), trade_tx);
+        app.arm_trading(agent.master, agent.address.clone(), agent.expires_ms, trade_tx);
         trader::spawn(base, tx.clone(), trade_rx, agent);
     }
     let mut tui = Tui::new()?;

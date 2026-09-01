@@ -4,6 +4,7 @@ pub mod fmt;
 mod fondos;
 mod heatmap;
 mod help;
+mod indsel;
 mod liq;
 pub(crate) mod oscimg;
 mod pair;
@@ -49,6 +50,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         app.overlay_drawn.set(true);
         help::draw(f);
+    }
+    if app.ind_ui.is_some() && matches!(app.view, View::Pair | View::WhaleRsi) {
+        app.overlay_drawn.set(true);
+        indsel::draw(f, app);
     }
     if app.input_mode {
         app.overlay_drawn.set(true);

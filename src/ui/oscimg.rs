@@ -43,6 +43,7 @@ pub(super) const BLUE: RGBColor = RGBColor(88, 166, 255);
 pub(super) const MAGENTA: RGBColor = RGBColor(198, 120, 221);
 pub(super) const GRAY: RGBColor = RGBColor(139, 148, 158);
 pub(super) const DIM_GREEN: RGBColor = RGBColor(52, 112, 70);
+pub(super) const CYAN: RGBColor = RGBColor(86, 182, 194);
 pub(super) const BAR_BUY: RGBColor = RGBColor(0, 110, 60);
 pub(super) const BAR_SELL: RGBColor = RGBColor(150, 35, 45);
 const MARK_BUY: RGBColor = RGBColor(86, 211, 128);
@@ -67,6 +68,9 @@ pub struct Gfx {
 struct Cached {
     size: Size,
     stamp: Instant,
+    /// Selección de indicadores visibles: mismas velas + distinta selección
+    /// también debe re-rasterizar (el `stamp` solo cubre los datos).
+    key: u64,
     proto: Protocol,
 }
 
@@ -166,13 +170,20 @@ pub(super) struct OscSpec<'a> {
     pub marks: Vec<(usize, bool)>,
 }
 
-/// Rasteriza (solo si cambió `stamp` o el tamaño) y pinta el panel en `area`.
+/// Contador de re-rasterizaciones (solo tests): evidencia directa de cuándo
+/// la clave de invalidación del caché dispara un raster nuevo de verdad.
+#[cfg(test)]
+pub(super) static RASTER_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Rasteriza (solo si cambió `stamp`, `key` o el tamaño) y pinta el panel.
 pub(super) fn draw_into(
     f: &mut Frame,
     area: Rect,
     gfx: &mut Gfx,
     slot: OscSlot,
     stamp: Instant,
+    key: u64,
     spec: OscSpec,
 ) {
     if gfx.blank_once {
@@ -192,7 +203,7 @@ pub(super) fn draw_into(
     let size = Size::new(area.width, area.height);
     if !cache
         .as_ref()
-        .is_some_and(|c| c.size == size && c.stamp == stamp)
+        .is_some_and(|c| c.size == size && c.stamp == stamp && c.key == key)
     {
         let fs = picker.font_size();
         let (pw, ph) = (
@@ -204,9 +215,16 @@ pub(super) fn draw_into(
             return;
         }
         let img = raster(pw, ph, fs.width as u32, &spec);
+        #[cfg(test)]
+        RASTER_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match picker.new_protocol(DynamicImage::ImageRgb8(img), size, Resize::Fit(None)) {
             Ok(proto) => {
-                *cache = Some(Cached { size, stamp, proto });
+                *cache = Some(Cached {
+                    size,
+                    stamp,
+                    key,
+                    proto,
+                });
             }
             Err(_) => {
                 *cache = None;

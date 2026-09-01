@@ -21,6 +21,16 @@
 use std::fs;
 use std::path::PathBuf;
 
+/// Expiración por defecto que Hyperliquid aplica a un agent aprobado SIN
+/// `valid_until` en el nombre: 90 días desde la aprobación. Solo se usa como
+/// fallback para claves guardadas antes de que esta app fijara la expiración.
+pub const DEFAULT_AGENT_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
+
+/// Máximo que el protocolo acepta como `valid_until`: 180 días en el futuro.
+/// Es lo que fija esta app al autorizar (el riesgo de la key está acotado —
+/// sin permiso de retiro — y así se reautoriza la mitad de veces).
+pub const MAX_AGENT_TTL_MS: u64 = 180 * 24 * 60 * 60 * 1000;
+
 use alloy_primitives::{keccak256, Address};
 use anyhow::{Context, Result};
 use k256::ecdsa::SigningKey;
@@ -90,7 +100,21 @@ pub struct LoadedAgent {
     pub address: String,
     /// Clave privada hex (0x + 64). No es `pub` fuera de `wallet`/crate.
     pub(crate) priv_hex: String,
+    /// Cuándo caduca la autorización (epoch ms). Con `valid_until_ms` en el
+    /// archivo es exacto; sin él (claves autorizadas antes de fijar expiración
+    /// explícita) es el default del protocolo: aprobación + 90 días. None solo
+    /// si el archivo tampoco trae `approved_nonce_ms` (no debería ocurrir).
+    pub expires_ms: Option<u64>,
 }
+
+/// Expiración a partir del JSON de la clave: `valid_until_ms` explícito, o
+/// el default del protocolo (aprobación + 90d) para archivos antiguos.
+fn expiry_from_json(v: &serde_json::Value) -> Option<u64> {
+    v["valid_until_ms"]
+        .as_u64()
+        .or_else(|| v["approved_nonce_ms"].as_u64().map(|n| n + DEFAULT_AGENT_TTL_MS))
+}
+
 
 /// Carga la clave del agent de esta red, verificando que el archivo es de la
 /// red pedida (autorizar en testnet no debe firmar jamás contra mainnet).
@@ -115,6 +139,7 @@ pub fn load(hl_chain: &str) -> Option<LoadedAgent> {
         master,
         address,
         priv_hex,
+        expires_ms: expiry_from_json(&v),
     })
 }
 
@@ -126,6 +151,7 @@ pub fn save_pending(
     agent_address: &str,
     priv_hex: &str,
     nonce: u64,
+    valid_until_ms: u64,
 ) -> Result<()> {
     let path = pending_path(hl_chain);
     let dir = path.parent().context("ruta sin directorio")?;
@@ -135,6 +161,7 @@ pub fn save_pending(
         "master": master,
         "hyperliquid_chain": hl_chain,
         "approved_nonce_ms": nonce,
+        "valid_until_ms": valid_until_ms,
         "private_key": priv_hex,
     });
     fs::write(&path, format!("{body:#}\n"))
@@ -205,7 +232,7 @@ mod tests {
         std::env::set_var("HYPERT_SECRETS_DIR", &tmp);
 
         let out = (|| -> Result<()> {
-            save_pending("Testnet", "0xMASTER", "0xAGENT", "0xkey", 123)?;
+            save_pending("Testnet", "0xMASTER", "0xAGENT", "0xkey", 123, 123 + MAX_AGENT_TTL_MS)?;
             // aún no promovida: no cuenta como agent existente
             assert_eq!(existing_agent("Testnet"), None);
             let path = promote("Testnet")?;
@@ -231,14 +258,31 @@ mod tests {
                 &a.address,
                 &a.priv_hex,
                 1,
+                1 + MAX_AGENT_TTL_MS,
             )?;
             promote("Mainnet")?;
             let l = load("Mainnet").expect("clave coherente debe cargar");
             assert_eq!(l.address, a.address);
             assert_eq!(l.priv_hex, a.priv_hex);
+            // valid_until_ms explícito manda sobre el fallback de 90d
+            assert_eq!(l.expires_ms, Some(1 + MAX_AGENT_TTL_MS));
             assert_eq!(
                 format!("{}", l.master),
                 "0x000000000000000000000000000000000000dEaD"
+            );
+            // archivo antiguo SIN valid_until_ms (clave autorizada antes de
+            // fijar expiración explícita): fallback = aprobación + 90 días
+            let legacy = serde_json::json!({
+                "agent_address": a.address,
+                "master": "0x000000000000000000000000000000000000dEaD",
+                "hyperliquid_chain": "Mainnet",
+                "approved_nonce_ms": 1000,
+                "private_key": a.priv_hex,
+            });
+            fs::write(key_path("Mainnet"), legacy.to_string())?;
+            assert_eq!(
+                load("Mainnet").unwrap().expires_ms,
+                Some(1000 + DEFAULT_AGENT_TTL_MS)
             );
             // la red del archivo manda: pedir Testnet no carga el de Mainnet
             // (el archivo Testnet del ciclo anterior tiene clave basura y

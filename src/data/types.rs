@@ -47,8 +47,10 @@ pub struct BackfillDelta {
 }
 
 /// Temporalidad de velas de la vista de par / liquidaciones.
-/// Los 7 valores están verificados contra `candleSnapshot` de la API real
-/// (2026-07-16): todos devuelven velas con el string de `api()` tal cual.
+/// Los 8 valores están verificados contra `candleSnapshot` de la API real
+/// (7 el 2026-07-16; `1w` el 2026-09-01: velas NATIVAS del servidor, rangos
+/// t→T de exactamente 7 días — no agregado local): todos devuelven velas con
+/// el string de `api()` tal cual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Interval {
     M1,
@@ -58,10 +60,11 @@ pub enum Interval {
     H4,
     H12,
     D1,
+    W1,
 }
 
 impl Interval {
-    pub const ALL: [Interval; 7] = [
+    pub const ALL: [Interval; 8] = [
         Interval::M1,
         Interval::M5,
         Interval::M15,
@@ -69,6 +72,7 @@ impl Interval {
         Interval::H4,
         Interval::H12,
         Interval::D1,
+        Interval::W1,
     ];
 
     pub fn api(&self) -> &'static str {
@@ -80,6 +84,7 @@ impl Interval {
             Interval::H4 => "4h",
             Interval::H12 => "12h",
             Interval::D1 => "1d",
+            Interval::W1 => "1w",
         }
     }
 
@@ -96,6 +101,7 @@ impl Interval {
             Interval::H4 => 4 * 3_600_000,
             Interval::H12 => 12 * 3_600_000,
             Interval::D1 => 24 * 3_600_000,
+            Interval::W1 => 7 * 24 * 3_600_000,
         }
     }
 
@@ -107,7 +113,8 @@ impl Interval {
             Interval::H1 => Interval::H4,
             Interval::H4 => Interval::H12,
             Interval::H12 => Interval::D1,
-            Interval::D1 => Interval::M1,
+            Interval::D1 => Interval::W1,
+            Interval::W1 => Interval::M1,
         }
     }
 }
