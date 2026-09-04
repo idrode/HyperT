@@ -11,6 +11,7 @@ mod pair;
 mod ranking;
 mod search;
 mod taplot;
+pub mod theme;
 pub mod wallet;
 mod whalersi;
 mod whales;

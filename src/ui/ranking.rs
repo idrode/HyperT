@@ -1,11 +1,15 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Cell, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
 use crate::app::{App, SortCol, OI_WIN_LONG, OI_WIN_SHORT};
 use crate::signals::Regime;
 
-use super::fmt::{fmt_opt, fmt_opt_pct, fmt_px, fmt_usd, sign_color};
+use super::fmt::{fmt_opt, fmt_opt_pct, fmt_px, fmt_usd};
+use super::theme;
 
+/// Color de la clasificación de flujo para las vistas que NO están en el
+/// piloto del tema. La Vista 1 usa `theme::regime_color`; esta se queda con
+/// los colores de antes porque la comparte la Vista 2.
 pub fn regime_color(r: Regime) -> Color {
     match r {
         Regime::LongBuild => Color::Green,
@@ -34,12 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             label.to_string()
         };
-        let style = if active {
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD)
-        };
-        Cell::from(text).style(style)
+        Cell::from(text).style(theme::header_style(active))
     };
     let s = crate::i18n::t();
     let header = Row::new(vec![
@@ -69,19 +68,24 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let d5 = p.oi_delta_pct(OI_WIN_SHORT);
             let d1h = p.oi_delta_pct(OI_WIN_LONG);
             let reg = p.regime(OI_WIN_LONG);
+            let sign = |v: Option<f64>, invert: bool| Style::new().fg(theme::sign_color(v, invert));
             Some(Row::new(vec![
-                Cell::from(format!("{:>3}", i + 1)).style(Style::new().fg(Color::DarkGray)),
-                Cell::from(name.clone()).style(Style::new().add_modifier(Modifier::BOLD)),
-                Cell::from(fmt_px(p.mid)),
-                Cell::from(fmt_opt_pct(chg, 2)).style(Style::new().fg(sign_color(chg, false))),
-                Cell::from(fmt_opt(f_h, 4)).style(Style::new().fg(sign_color(f_h, true))),
-                Cell::from(fmt_opt_pct(apr, 1)).style(Style::new().fg(sign_color(apr, true))),
-                Cell::from(fmt_opt(prem, 1)).style(Style::new().fg(sign_color(prem, true))),
-                Cell::from(fmt_usd(p.oi_notional())),
-                Cell::from(fmt_opt_pct(d5, 2)).style(Style::new().fg(sign_color(d5, false))),
-                Cell::from(fmt_opt_pct(d1h, 2)).style(Style::new().fg(sign_color(d1h, false))),
-                Cell::from(reg.label()).style(Style::new().fg(regime_color(reg))),
-                Cell::from(fmt_usd(p.volume24())),
+                Cell::from(format!("{:>3}", i + 1)).style(Style::new().fg(theme::MUTED)),
+                Cell::from(name.clone()).style(
+                    Style::new()
+                        .fg(theme::FG_STRONG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Cell::from(fmt_px(p.mid)).style(Style::new().fg(theme::FG)),
+                Cell::from(fmt_opt_pct(chg, 2)).style(sign(chg, false)),
+                Cell::from(fmt_opt(f_h, 4)).style(sign(f_h, true)),
+                Cell::from(fmt_opt_pct(apr, 1)).style(sign(apr, true)),
+                Cell::from(fmt_opt(prem, 1)).style(sign(prem, true)),
+                Cell::from(fmt_usd(p.oi_notional())).style(Style::new().fg(theme::FG)),
+                Cell::from(fmt_opt_pct(d5, 2)).style(sign(d5, false)),
+                Cell::from(fmt_opt_pct(d1h, 2)).style(sign(d1h, false)),
+                Cell::from(reg.label()).style(Style::new().fg(theme::regime_color(reg))),
+                Cell::from(fmt_usd(p.volume24())).style(Style::new().fg(theme::FG)),
             ]))
         })
         .collect();
@@ -119,15 +123,20 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(15),
         Constraint::Length(8),
     ];
+    // marco del tema: el aspecto (grueso / doble / bloques / fino) se elige en
+    // theme::BORDER_LOOK, no aquí
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(theme::border_set())
+        .border_style(theme::border_style())
+        .title(Span::styled(title, theme::title_style()))
+        .style(theme::base());
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title(title))
-        .row_highlight_style(
-            Style::new()
-                .bg(Color::Rgb(40, 44, 66))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶");
+        .block(block)
+        .style(theme::base())
+        .row_highlight_style(theme::row_highlight())
+        .highlight_symbol(Span::styled("▶", Style::new().fg(theme::CURSOR)));
 
     let hi = if searching { app.search.sel } else { app.sel };
     app.table_state
