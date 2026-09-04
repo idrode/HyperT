@@ -136,14 +136,26 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             View::Flow => s.foot_flow,
         }
     };
-    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(46)]).split(area);
+    // el hueco del error se adapta al ancho real de la terminal: con 46
+    // columnas fijas y un corte a 44 caracteres, un mensaje con detalle
+    // (p. ej. el diagnóstico del escaneo de whales, que adjunta dirección y
+    // error real) se cortaba SIEMPRE justo antes de la parte útil, dejando
+    // solo el conteo. El hint de teclas conserva su sitio mínimo.
+    let err_w = if app.last_err.is_some() {
+        let hint_w = hint.chars().count() as u16 + 2;
+        (area.width.saturating_sub(hint_w)).clamp(46, 200).min(area.width)
+    } else {
+        46
+    };
+    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(err_w)]).split(area);
     f.render_widget(
         Paragraph::new(Span::styled(hint, Style::new().fg(Color::DarkGray))),
         cols[0],
     );
     if let Some(err) = &app.last_err {
-        let mut msg: String = err.chars().take(44).collect();
-        if err.chars().count() > 44 {
+        let cap = cols[1].width.saturating_sub(2) as usize;
+        let mut msg: String = err.chars().take(cap).collect();
+        if err.chars().count() > cap {
             msg.push('…');
         }
         f.render_widget(
@@ -151,5 +163,64 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 .alignment(Alignment::Right),
             cols[1],
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokio::sync::{mpsc, watch};
+
+    use crate::app::App;
+    use crate::data::types::DataMsg;
+    use crate::ui::oscimg::Gfx;
+
+    fn app_con_error(err: &str) -> App {
+        std::env::set_var("CHART_PROTO", "halfblocks");
+        let (extra_tx, _e) = mpsc::channel(8);
+        let (wallet_tx, _w) = watch::channel(Vec::new());
+        let (usdc_tx, _u) = watch::channel(None);
+        let (coin_tx, _c) = watch::channel(None);
+        let (wc_tx, _wc) = mpsc::unbounded_channel();
+        let mut app = App::new(extra_tx, wallet_tx, usdc_tx, coin_tx, wc_tx, "test", Gfx::new());
+        app.apply_msg(DataMsg::RestError(err.to_string()));
+        app
+    }
+
+    /// El diagnóstico del escaneo de whales adjunta dirección + error real,
+    /// pero el pie truncaba SIEMPRE a 44 caracteres con un hueco fijo de 46
+    /// columnas: el prefijo ("whales: 27/100 cuentas fallaron · ") ya gasta
+    /// 34, así que del detalle solo sobrevivían 10 caracteres — justo la
+    /// parte que hace falta para diagnosticar. En una terminal ancha el
+    /// detalle llega entero; en una estrecha se recorta sin romper el hint.
+    #[test]
+    fn el_pie_no_se_come_el_detalle_del_error_en_terminal_ancha() {
+        let err = "whales: 27/100 cuentas fallaron · \
+                   0xf8E3128CDE1234567890123456789012345678: error sending request";
+        let render = |w: u16| {
+            let mut app = app_con_error(err);
+            let mut term = Terminal::new(TestBackend::new(w, 3)).unwrap();
+            term.draw(|f| {
+                let area = super::Rect::new(0, 2, w, 1);
+                super::draw_footer(f, &app, area);
+            })
+            .unwrap();
+            app.last_err = None; // silencia el aviso de no-usado tras el draw
+            let b = term.backend().buffer().clone();
+            (0..b.area.width)
+                .map(|x| b.cell((x, 2)).map(|c| c.symbol()).unwrap_or(" ").to_string())
+                .collect::<String>()
+        };
+        // terminal ancha: la dirección completa y el error real sobreviven
+        let wide = render(200);
+        assert!(
+            wide.contains("0xf8E3128CDE1234567890123456789012345678"),
+            "la dirección se pierde:\n{wide}"
+        );
+        assert!(wide.contains("error sending request"), "{wide}");
+        // terminal estrecha: se recorta, pero el conteo sigue visible
+        let narrow = render(80);
+        assert!(narrow.contains("whales: 27/100"), "{narrow}");
     }
 }
