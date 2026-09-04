@@ -31,9 +31,84 @@ pub const DEFAULT_AGENT_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 /// sin permiso de retiro — y así se reautoriza la mitad de veces).
 pub const MAX_AGENT_TTL_MS: u64 = 180 * 24 * 60 * 60 * 1000;
 
+/// Desde cuándo se enseña la cuenta atrás en el panel (día −20). Antes de
+/// esto la línea solo dice la fecha, sin urgencia: avisar demasiado pronto
+/// entrena a ignorar el aviso.
+pub const COUNTDOWN_WINDOW_MS: u64 = 20 * 24 * 60 * 60 * 1000;
+
+/// Umbral del color ámbar (día −10): el relevo ya debería estar planificado.
+pub const AMBER_MS: u64 = 10 * 24 * 60 * 60 * 1000;
+
+/// Desde el día −5 sin relevo se BLOQUEAN las entradas nuevas. Cerrar,
+/// cancelar y editar SL/TP siguen sin restricción hasta el último momento de
+/// validez real: quedarse sin poder proteger una posición abierta sería peor
+/// que abrir una entrada tarde.
+pub const BLOCK_ENTRIES_MS: u64 = 5 * 24 * 60 * 60 * 1000;
+
 use alloy_primitives::{keccak256, Address};
 use anyhow::{Context, Result};
 use k256::ecdsa::SigningKey;
+
+/// Tramo de vida de la autorización, con el color/urgencia que le toca en la
+/// Vista 8. Es una función pura del tiempo restante — testeada abajo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Life {
+    /// Más de 20 días: sin cuenta atrás, solo la fecha.
+    Fresh,
+    /// −20 a −10 días: cuenta atrás en verde, informativa.
+    Countdown,
+    /// −10 a −5 días: ámbar, conviene activar el relevo ya.
+    Amber,
+    /// −5 días a la expiración: urgente. Entradas nuevas BLOQUEADAS.
+    Urgent,
+    /// Ya caducada: las firmas fallan del lado del servidor.
+    Expired,
+}
+
+impl Life {
+    /// Tramo correspondiente al tiempo que queda (ms, negativo si caducó).
+    pub fn from_left_ms(left_ms: i64) -> Life {
+        if left_ms <= 0 {
+            Life::Expired
+        } else if (left_ms as u64) < BLOCK_ENTRIES_MS {
+            Life::Urgent
+        } else if (left_ms as u64) < AMBER_MS {
+            Life::Amber
+        } else if (left_ms as u64) < COUNTDOWN_WINDOW_MS {
+            Life::Countdown
+        } else {
+            Life::Fresh
+        }
+    }
+
+    /// ¿Se dibuja la cuenta atrás (día −20 en adelante)?
+    pub fn shows_countdown(self) -> bool {
+        !matches!(self, Life::Fresh)
+    }
+
+    /// ¿Se bloquean las ENTRADAS nuevas? Solo entradas: cerrar/cancelar/
+    /// editar SL-TP nunca se bloquean por expiración.
+    pub fn blocks_entries(self) -> bool {
+        matches!(self, Life::Urgent | Life::Expired)
+    }
+}
+
+/// Días completos que quedan (redondeando hacia abajo); 0 si ya caducó.
+pub fn days_left(left_ms: i64) -> u64 {
+    if left_ms <= 0 {
+        0
+    } else {
+        (left_ms as u64) / 86_400_000
+    }
+}
+
+/// Ahora en epoch ms (0 si el reloj del sistema está antes de 1970).
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Clave recién generada, aún sin autorizar. La clave privada vive solo en
 /// memoria (y en el `.pending` una vez pedida la firma).
@@ -105,6 +180,11 @@ pub struct LoadedAgent {
     /// explícita) es el default del protocolo: aprobación + 90 días. None solo
     /// si el archivo tampoco trae `approved_nonce_ms` (no debería ocurrir).
     pub expires_ms: Option<u64>,
+    /// ¿La expiración es EXPLÍCITA (`valid_until_ms` en el archivo, es decir
+    /// autorizada por esta app con el flujo nombrado "hypert")? Los agents
+    /// antiguos, sin nombre, no aparecen necesariamente en `extraAgents`, así
+    /// que su ausencia allí NO se puede tratar como una revocación.
+    pub explicit_expiry: bool,
 }
 
 /// Expiración a partir del JSON de la clave: `valid_until_ms` explícito, o
@@ -140,7 +220,80 @@ pub fn load(hl_chain: &str) -> Option<LoadedAgent> {
         address,
         priv_hex,
         expires_ms: expiry_from_json(&v),
+        explicit_expiry: v["valid_until_ms"].as_u64().is_some(),
     })
+}
+
+/// Qué dice EL SERVIDOR sobre el agent que el panel tiene armado. El cálculo
+/// local de la expiración sale del archivo en disco, que puede estar
+/// desactualizado (agent revocado desde la web, reemplazado por otro cliente,
+/// o una fecha mal supuesta): esta comprobación es la fuente autoritativa.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Registration {
+    /// Consulta en vuelo (o aún sin lanzar).
+    Checking,
+    /// `extraAgents` lo lista. `valid_until_ms` es la expiración QUE DICE EL
+    /// SERVIDOR cuando la trae — manda sobre el cálculo local.
+    Listed { valid_until_ms: Option<u64> },
+    /// El servidor respondió bien y el agent NO está en la lista: la clave de
+    /// disco ya no vale para firmar, por mucho que la fecha local diga que sí.
+    NotListed,
+    /// No se pudo comprobar (red/servidor). NO es lo mismo que NotListed: no
+    /// se bloquea nada por esto, solo se dice que no se pudo verificar.
+    Unknown { error: String },
+}
+
+/// Consulta `extraAgents` del Info API y dice si `agent` sigue registrado
+/// para `master`. Mismo endpoint que ya usa la verificación posterior a una
+/// autorización — aquí se reutiliza para el agent YA guardado.
+pub async fn check_registration(api: &str, master: &str, agent: &str) -> Registration {
+    let body = serde_json::json!({"type": "extraAgents", "user": master});
+    let resp = reqwest::Client::new()
+        .post(format!("{api}/info"))
+        .json(&body)
+        .send()
+        .await;
+    let json: serde_json::Value = match resp {
+        Ok(r) => match r.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                return Registration::Unknown {
+                    error: format!("respuesta ilegible de extraAgents: {e}"),
+                }
+            }
+        },
+        Err(e) => {
+            return Registration::Unknown {
+                error: format!("no se pudo consultar extraAgents: {e}"),
+            }
+        }
+    };
+    let Some(list) = json.as_array() else {
+        return Registration::Unknown {
+            error: "extraAgents no devolvió una lista".into(),
+        };
+    };
+    match find_agent(list, agent) {
+        Some(valid_until_ms) => Registration::Listed { valid_until_ms },
+        None => Registration::NotListed,
+    }
+}
+
+/// Busca el agent en la respuesta de `extraAgents` (comparación de direcciones
+/// insensible a mayúsculas: el servidor no garantiza el checksum EIP-55) y
+/// devuelve su `validUntil` si lo trae. Separado para poder testearlo sin red.
+fn find_agent(list: &[serde_json::Value], agent: &str) -> Option<Option<u64>> {
+    let want = agent.to_lowercase();
+    let e = list.iter().find(|a| {
+        a["address"]
+            .as_str()
+            .is_some_and(|x| x.to_lowercase() == want)
+    })?;
+    // el campo llega como número o como string según la versión del API
+    let vu = e["validUntil"]
+        .as_u64()
+        .or_else(|| e["validUntil"].as_str().and_then(|s| s.parse().ok()));
+    Some(vu)
 }
 
 /// Escribe la clave nueva en `<ruta>.pending` con permisos 0600 (y el
@@ -220,6 +373,76 @@ mod tests {
         assert_eq!(format!("{}", derive_address(&sk)), a.address);
         // dos generaciones nunca coinciden (RNG del sistema)
         assert_ne!(generate().priv_hex, a.priv_hex);
+    }
+
+    /// Los tramos de vida y el bloqueo de entradas caen donde dice el diseño:
+    /// cuenta atrás desde −20d, ámbar desde −10d, urgente + entradas
+    /// bloqueadas desde −5d, y caducada al pasar la fecha. En NINGÚN tramo se
+    /// bloquea cerrar/cancelar/SL-TP (eso no se decide aquí, pero el único
+    /// predicado que existe se llama `blocks_entries` a propósito).
+    #[test]
+    fn tramos_de_vida_y_bloqueo_de_entradas() {
+        let d = |n: f64| (n * 86_400_000.0) as i64;
+        assert_eq!(Life::from_left_ms(d(45.0)), Life::Fresh);
+        assert_eq!(Life::from_left_ms(d(20.1)), Life::Fresh);
+        assert_eq!(Life::from_left_ms(d(19.9)), Life::Countdown);
+        assert_eq!(Life::from_left_ms(d(10.1)), Life::Countdown);
+        assert_eq!(Life::from_left_ms(d(9.9)), Life::Amber);
+        assert_eq!(Life::from_left_ms(d(5.1)), Life::Amber);
+        assert_eq!(Life::from_left_ms(d(4.9)), Life::Urgent);
+        assert_eq!(Life::from_left_ms(d(0.01)), Life::Urgent);
+        assert_eq!(Life::from_left_ms(0), Life::Expired);
+        assert_eq!(Life::from_left_ms(d(-3.0)), Life::Expired);
+
+        // la cuenta atrás aparece exactamente a partir del día −20
+        assert!(!Life::Fresh.shows_countdown());
+        for l in [Life::Countdown, Life::Amber, Life::Urgent, Life::Expired] {
+            assert!(l.shows_countdown());
+        }
+        // y el bloqueo de entradas SOLO en los dos últimos tramos
+        for l in [Life::Fresh, Life::Countdown, Life::Amber] {
+            assert!(!l.blocks_entries(), "{l:?} no debe bloquear entradas");
+        }
+        for l in [Life::Urgent, Life::Expired] {
+            assert!(l.blocks_entries(), "{l:?} debe bloquear entradas");
+        }
+
+        assert_eq!(days_left(d(19.9)), 19);
+        assert_eq!(days_left(d(0.5)), 0);
+        assert_eq!(days_left(-1), 0);
+    }
+
+    /// Lectura de extraAgents: dirección insensible a mayúsculas, validUntil
+    /// aceptado como número o como string, y "no está en la lista" distinguido
+    /// de "está pero sin validUntil".
+    #[test]
+    fn lectura_de_extra_agents() {
+        let list: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+                {"address":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"hypert","validUntil":1790000000000},
+                {"address":"0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","name":"otro","validUntil":"1795000000000"},
+                {"address":"0xcccccccccccccccccccccccccccccccccccccccc","name":"viejo"}
+            ]"#,
+        )
+        .unwrap();
+        // checksum distinto al del servidor: debe encontrarlo igualmente
+        assert_eq!(
+            find_agent(&list, "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Some(Some(1_790_000_000_000))
+        );
+        assert_eq!(
+            find_agent(&list, "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            Some(Some(1_795_000_000_000))
+        );
+        // listado pero sin validUntil ≠ no listado
+        assert_eq!(
+            find_agent(&list, "0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
+            Some(None)
+        );
+        assert_eq!(
+            find_agent(&list, "0xdddddddddddddddddddddddddddddddddddddddd"),
+            None
+        );
     }
 
     /// Ciclo completo pending → promote con lectura de la dirección, en un

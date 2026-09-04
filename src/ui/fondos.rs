@@ -1390,6 +1390,7 @@ mod tests {
                     + 3 * 86_400_000
                     + 3_600_000,
             ),
+            true,
             trade_tx,
         );
         let master = app.trade.as_ref().unwrap().master_fmt.clone();
@@ -1446,10 +1447,11 @@ mod tests {
         );
         // la posición real pintada con su liq exacta de la API
         assert!(s.contains("90500"), "falta la liq real:\n{s}");
-        // a 3 días de la expiración: aviso visible en la línea de estado
+        // a 3 días de la expiración: cuenta atrás visible en la línea de
+        // estado, con la salida hacia el relevo ofrecida en el mismo sitio
         assert!(
-            s.contains("key EXPIRES") && s.contains("(3d left)"),
-            "falta el aviso de expiración del agent:\n{s}"
+            s.contains("authorization: 3d left") && s.contains("press a to renew"),
+            "falta la cuenta atrás del agent:\n{s}"
         );
     }
 

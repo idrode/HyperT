@@ -492,7 +492,11 @@ fn draw_form(
 fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>) {
     let tr = crate::i18n::t();
     let st = &app.exec;
-    let ord_h = (st.orders.len() as u16 + 3).clamp(4, area.height / 2);
+    // `clamp` panica si el máximo queda por debajo del mínimo: en una
+    // terminal baja, area.height/2 puede ser 0 y reventaba la app entera al
+    // entrar en la Vista 8 (crash real, reproducido con el driver pty a 24
+    // filas). El techo nunca puede quedar por debajo del suelo.
+    let ord_h = (st.orders.len() as u16 + 3).clamp(4, (area.height / 2).max(4));
     let rows = Layout::vertical([
         Constraint::Min(5),
         Constraint::Length(1),
@@ -716,43 +720,89 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
                 tr.ex_real_agent_signs.replacen("{}", &agent, 1),
                 Style::new().fg(Color::Red),
             );
-            // expiración de la autorización del agent: siempre visible con el
-            // panel armado; los últimos 7 días avisan en amarillo, y caducada
-            // se dice sin rodeos (las firmas fallan del lado del servidor de
-            // una forma indistinguible de un bug de firma)
-            if let Some(exp) = app.trade.as_ref().and_then(|t| t.agent_expires_ms) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let date = super::fmt::date_label(exp);
-                if now >= exp {
-                    b.push(
-                        tr.ex_agent_expired.replacen("{}", &date, 1),
-                        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    );
-                } else {
-                    let days_left = (exp - now) / 86_400_000;
-                    let (msg, st) = if days_left < 7 {
-                        (
-                            tr.ex_agent_expiry_warn,
-                            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        (tr.ex_agent_expiry, dim())
-                    };
-                    b.push(
-                        msg.replacen("{}", &date, 1)
-                            .replacen("{}", &days_left.to_string(), 1),
-                        st,
-                    );
-                }
-            }
         } else {
             b.push(tr.ex_mock_nothing_sent, dim());
         }
+        // expiración de la autorización del agent: SIEMPRE visible con el
+        // panel armado, también mientras hay un error o un estado en curso —
+        // un mensaje pasajero no puede tapar la cuenta atrás. Hasta el día
+        // −20 solo la fecha; a partir de ahí la cuenta atrás, escalando de
+        // verde a ámbar a urgente. Caducada se dice sin rodeos: las firmas
+        // fallan del lado del servidor de una forma indistinguible de un bug.
+        if st.real {
+            if let Some(t) = app.trade.as_ref() {
+                agent_expiry_span(&mut b, t);
+                registration_span(&mut b, t);
+            }
+        }
         b.render(f);
     }
+}
+
+/// Cuenta atrás de la autorización del agent, con el color del tramo:
+/// gris fuera de la ventana de aviso, verde a partir del día −20, ámbar
+/// desde el −10, rojo desde el −5 (donde además se bloquean las entradas) y
+/// rojo en negrita si ya caducó. El texto sale de la expiración EFECTIVA:
+/// la del servidor cuando la trae, la del archivo de la clave si no.
+fn agent_expiry_span(b: &mut LineB, t: &crate::app::TradeArm) {
+    use crate::wallet::agent::{days_left, Life};
+    let tr = crate::i18n::t();
+    let Some((life, left, exp)) = t.life() else {
+        return;
+    };
+    let date = super::fmt::date_label(exp);
+    if life == Life::Expired {
+        b.push(
+            tr.ex_agent_expired.replacen("{}", &date, 1),
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        );
+        b.push(
+            tr.ex_agent_relay_hint,
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        );
+        return;
+    }
+    if !life.shows_countdown() {
+        // aún lejos: solo la fecha, sin urgencia que entrene a ignorarla
+        b.push(
+            tr.ex_agent_expiry
+                .replacen("{}", &date, 1)
+                .replacen("{}", &days_left(left).to_string(), 1),
+            dim(),
+        );
+        return;
+    }
+    let style = match life {
+        Life::Countdown => Style::new().fg(Color::Green),
+        Life::Amber => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        _ => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+    };
+    b.push(
+        tr.ex_agent_countdown
+            .replacen("{}", &days_left(left).to_string(), 1)
+            .replacen("{}", &date, 1),
+        style,
+    );
+    // el relevo se ofrece desde el primer día de cuenta atrás
+    b.push(tr.ex_agent_relay_hint, style);
+}
+
+/// Qué dice el SERVIDOR sobre este agent. Un "no listado" se enseña de forma
+/// inmediata y sin ambigüedad: es la diferencia entre confiar en una fecha de
+/// un archivo local y saber que la clave ya no puede firmar.
+fn registration_span(b: &mut LineB, t: &crate::app::TradeArm) {
+    use crate::wallet::agent::Registration;
+    let tr = crate::i18n::t();
+    match &t.reg {
+        Registration::Checking => b.push(tr.ex_reg_checking, dim()),
+        // listado: es el caso normal, no gasta ancho de línea
+        Registration::Listed { .. } => return,
+        Registration::NotListed => b.push(
+            tr.ex_reg_not_listed,
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Registration::Unknown { .. } => b.push(tr.ex_reg_unknown, Style::new().fg(Color::Yellow)),
+    };
 }
 
 /// Título de tabla con recuento — REALES en modo real, maqueta si no

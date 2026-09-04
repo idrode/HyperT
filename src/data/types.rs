@@ -438,6 +438,10 @@ pub enum DataMsg {
     /// Fase de la autorización de agent wallet (paso 6): firma EIP-712 →
     /// aceptada por Hyperliquid + clave guardada → verificada en extraAgents.
     Agent(crate::wallet::walletconnect::AgentStatus),
+    /// Qué dice el SERVIDOR (`extraAgents`) sobre el agent que el panel de
+    /// ejecución tiene armado — verificación real, no el cálculo local de la
+    /// expiración a partir del archivo de la clave.
+    AgentReg(crate::wallet::agent::Registration),
     /// Fase de la transferencia interna spot⇄perps (usdClassTransfer):
     /// firma EIP-712 → aceptada → reflejada en el saldo destino (o fallo).
     Transfer(crate::wallet::walletconnect::TransferStatus),

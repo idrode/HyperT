@@ -95,10 +95,28 @@ async fn main() -> Result<()> {
     } else {
         wallet::agent::load("Mainnet")
     };
+    // permite re-armar el trading en caliente al activar un relevo de agent,
+    // sin reiniciar la app (ver App::rearm_trading_after_relay)
+    app.set_trading_ctx(base, tx.clone());
     if let Some(agent) = agent {
         let (trade_tx, trade_rx) = mpsc::unbounded_channel();
         data::spawn_orders_watcher(base, tx.clone(), agent.master);
-        app.arm_trading(agent.master, agent.address.clone(), agent.expires_ms, trade_tx);
+        // verificación REAL contra el servidor al armar el panel: si
+        // extraAgents no lista esta clave, el panel lo dice de inmediato en
+        // vez de confiar solo en la fecha calculada del archivo
+        data::spawn_agent_registration_watcher(
+            base,
+            tx.clone(),
+            agent.master,
+            agent.address.clone(),
+        );
+        app.arm_trading(
+            agent.master,
+            agent.address.clone(),
+            agent.expires_ms,
+            agent.explicit_expiry,
+            trade_tx,
+        );
         trader::spawn(base, tx.clone(), trade_rx, agent);
     }
     let mut tui = Tui::new()?;

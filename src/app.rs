@@ -1371,6 +1371,10 @@ pub struct App {
     coin_tx: watch::Sender<Option<String>>,
     /// Comandos hacia el gestor de sesión WalletConnect.
     wc_tx: mpsc::UnboundedSender<WcCmd>,
+    /// Red + canal de datos, para poder RE-ARMAR el trading en caliente
+    /// cuando se activa un relevo de agent (la clave nueva se carga de disco
+    /// y se levanta un trader nuevo sin reiniciar la app). None en tests.
+    trading_ctx: Option<(hyperliquid_rust_sdk::BaseUrl, mpsc::UnboundedSender<DataMsg>)>,
 }
 
 /// Contexto del trading real: la cuenta cuyas posiciones/órdenes se muestran
@@ -1386,7 +1390,87 @@ pub struct TradeArm {
     /// poder operar al pasar esta fecha (las firmas fallan del lado del
     /// servidor). None si el archivo de la clave no permitió calcularla.
     pub agent_expires_ms: Option<u64>,
+    /// Lo que dice el SERVIDOR (`extraAgents`) sobre este agent. Manda sobre
+    /// el cálculo local: un agent revocado desde fuera sigue teniendo una
+    /// fecha futura en el archivo de disco.
+    pub reg: crate::wallet::agent::Registration,
+    /// ¿Esta clave la autorizó esta app con el flujo nombrado (valid_until
+    /// explícito)? Solo entonces su ausencia en `extraAgents` significa
+    /// revocación: los agents antiguos SIN nombre no se listan ahí, y tratar
+    /// esa ausencia como revocación bloquearía un panel perfectamente válido.
+    pub explicit_expiry: bool,
     tx: mpsc::UnboundedSender<TraderCmd>,
+}
+
+impl TradeArm {
+    /// Expiración que se usa para decidir: la del servidor si la trajo,
+    /// si no la calculada del archivo de la clave.
+    pub fn effective_expiry_ms(&self) -> Option<u64> {
+        if let crate::wallet::agent::Registration::Listed {
+            valid_until_ms: Some(v),
+        } = self.reg
+        {
+            return Some(v);
+        }
+        self.agent_expires_ms
+    }
+
+    /// Tramo de vida de la autorización, o None si no se pudo calcular
+    /// ninguna fecha (archivo antiguo sin nonce y servidor sin validUntil).
+    pub fn life(&self) -> Option<(crate::wallet::agent::Life, i64, u64)> {
+        let exp = self.effective_expiry_ms()?;
+        let left = exp as i64 - crate::wallet::agent::now_ms() as i64;
+        Some((crate::wallet::agent::Life::from_left_ms(left), left, exp))
+    }
+
+    /// ¿Se bloquean las ENTRADAS nuevas? Dos motivos independientes:
+    /// quedan menos de 5 días (o ya caducó), o el servidor NO lista el agent.
+    /// Cerrar, cancelar y editar SL/TP nunca se bloquean por esto.
+    pub fn entries_blocked(&self) -> Option<EntryBlock> {
+        // "no listado" solo se toma como revocación para las claves que ESTA
+        // app autorizó con nombre (verificadas en extraAgents en el momento
+        // de autorizarlas). Para una clave antigua sin nombre la ausencia no
+        // prueba nada: se avisa en pantalla, pero no se bloquea nada.
+        if self.explicit_expiry && self.reg == crate::wallet::agent::Registration::NotListed {
+            return Some(EntryBlock::NotRegistered);
+        }
+        let (life, left, _) = self.life()?;
+        if !life.blocks_entries() {
+            return None;
+        }
+        Some(if life == crate::wallet::agent::Life::Expired {
+            EntryBlock::Expired
+        } else {
+            EntryBlock::Expiring {
+                days: crate::wallet::agent::days_left(left),
+            }
+        })
+    }
+}
+
+/// Motivo por el que las entradas nuevas están bloqueadas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryBlock {
+    /// Quedan menos de 5 días de autorización y no se ha activado el relevo.
+    Expiring { days: u64 },
+    /// La autorización ya caducó: las firmas fallan del lado del servidor.
+    Expired,
+    /// El servidor no lista el agent (revocado o reemplazado desde fuera).
+    NotRegistered,
+}
+
+impl EntryBlock {
+    /// Mensaje para la línea de error del panel, ya traducido.
+    pub fn message(self) -> String {
+        let tr = crate::i18n::t();
+        match self {
+            EntryBlock::Expiring { days } => {
+                tr.ex_block_expiring.replacen("{}", &days.to_string(), 1)
+            }
+            EntryBlock::Expired => tr.ex_block_expired.to_string(),
+            EntryBlock::NotRegistered => tr.ex_block_unregistered.to_string(),
+        }
+    }
 }
 
 impl App {
@@ -1495,7 +1579,18 @@ impl App {
             usdc_tx,
             coin_tx,
             wc_tx,
+            trading_ctx: None,
         }
+    }
+
+    /// Red + canal de datos que permiten re-armar el trading en caliente al
+    /// activar un relevo de agent. Lo fija `main` una vez, al arrancar.
+    pub fn set_trading_ctx(
+        &mut self,
+        base: hyperliquid_rust_sdk::BaseUrl,
+        tx: mpsc::UnboundedSender<DataMsg>,
+    ) {
+        self.trading_ctx = Some((base, tx));
     }
 
     /// Frescura del WS para el indicador de cabecera: hubo mensaje reciente.
@@ -1776,7 +1871,29 @@ impl App {
             },
             DataMsg::Deposit(s) => self.deposit = Some(s),
             DataMsg::Withdraw(s) => self.withdraw = Some(s),
-            DataMsg::Agent(s) => self.agent = Some(s),
+            DataMsg::Agent(s) => {
+                // relevo completado: la clave nueva ya está en disco (promote
+                // solo ocurre con el ok de /exchange), así que el panel pasa a
+                // firmar con ella sin reiniciar. Accepted basta — Verified
+                // llega después y re-armar dos veces sería un no-op.
+                let relayed = matches!(
+                    s,
+                    AgentStatus::Accepted { .. }
+                        | AgentStatus::Verified { .. }
+                        | AgentStatus::Unlisted { .. }
+                );
+                self.agent = Some(s);
+                // vale también para la PRIMERA autorización de una red: el
+                // panel pasa de maqueta a real sin reiniciar
+                if relayed {
+                    self.rearm_trading_after_relay();
+                }
+            }
+            DataMsg::AgentReg(r) => {
+                if let Some(t) = &mut self.trade {
+                    t.reg = r;
+                }
+            }
             DataMsg::Transfer(s) => self.transfer = Some(s),
             DataMsg::WsStatus(ok) => self.ws_ok = ok,
             DataMsg::RestError(e) => self.last_err = Some(e),
@@ -2525,6 +2642,7 @@ impl App {
         master: Address,
         agent_addr: String,
         agent_expires_ms: Option<u64>,
+        explicit_expiry: bool,
         tx: mpsc::UnboundedSender<TraderCmd>,
     ) {
         self.trade = Some(TradeArm {
@@ -2532,6 +2650,8 @@ impl App {
             master_fmt: format!("{master}"),
             agent_addr,
             agent_expires_ms,
+            reg: crate::wallet::agent::Registration::Checking,
+            explicit_expiry,
             tx,
         });
         self.exec.real = true;
@@ -2540,6 +2660,61 @@ impl App {
         self.exec.orders.clear();
         self.exec.seeded = true;
         self.sync_funds_target();
+    }
+
+    /// Relevo activado (punto 4): la clave nueva ya está promovida en disco,
+    /// así que se carga y se levanta un trader NUEVO con ella. Soltar el
+    /// `TradeArm` anterior cierra su canal, y con él termina la tarea del
+    /// trader viejo — el agent anterior deja de firmar sin fricción y sin
+    /// reiniciar la app. El contador se resetea solo: sale de la clave nueva.
+    fn rearm_trading_after_relay(&mut self) {
+        let Some((base, tx)) = self.trading_ctx.clone() else {
+            return;
+        };
+        let hl_chain = if self.net_label == "testnet" {
+            "Testnet"
+        } else {
+            "Mainnet"
+        };
+        let Some(agent) = crate::wallet::agent::load(hl_chain) else {
+            self.exec.err = Some(crate::i18n::t().ex_relay_reload_failed.to_string());
+            return;
+        };
+        // el agent nuevo debe ser de la MISMA maestra que el panel ya observa;
+        // si no, algo no cuadra y es mejor no tocar nada armado
+        if let Some(t) = &self.trade {
+            if t.master != agent.master {
+                self.exec.err = Some(crate::i18n::t().ex_relay_master_mismatch.to_string());
+                return;
+            }
+            if t.agent_addr == agent.address {
+                return; // ya armado con esta clave: nada que relevar
+            }
+        }
+        // sin panel armado antes (primera autorización en esta red) hay que
+        // levantar además el watcher de órdenes; con panel ya armado ese
+        // watcher existe y duplicarlo solo doblaría el polling
+        let primera_vez = self.trade.is_none();
+        let (trade_tx, trade_rx) = mpsc::unbounded_channel();
+        self.arm_trading(
+            agent.master,
+            agent.address.clone(),
+            agent.expires_ms,
+            agent.explicit_expiry,
+            trade_tx,
+        );
+        if primera_vez {
+            crate::data::spawn_orders_watcher(base, tx.clone(), agent.master);
+        }
+        crate::data::spawn_agent_registration_watcher(
+            base,
+            tx.clone(),
+            agent.master,
+            agent.address.clone(),
+        );
+        crate::trader::spawn(base, tx, trade_rx, agent);
+        self.exec.err = None;
+        self.exec.status = Some(crate::i18n::t().ex_relay_done.to_string());
     }
 
     /// Modo real: reconstruye las filas del panel desde la cuenta de VERDAD
@@ -3194,6 +3369,9 @@ impl App {
         // misma puerta que el retiro: sesión activa con ruta conocida y
         // clearinghouseState leído (sin cuenta en Hyperliquid no hay agent)
         let Some((route, _)) = self.withdraw_route() else {
+            // el relevo se pide justo cuando corre prisa: pulsar `a` sin
+            // sesión no puede quedarse en silencio
+            self.exec.err = Some(crate::i18n::t().ex_relay_needs_wc.to_string());
             return;
         };
         let fresh = crate::wallet::agent::generate();
@@ -3407,6 +3585,14 @@ impl App {
     /// En modo REAL valida además el margen disponible (perps_avail, la
     /// fuente correcta también en cuenta unificada) ANTES de permitir enviar.
     fn exec_submit(&mut self) {
+        // puerta de expiración (punto 3): con menos de 5 días de autorización,
+        // caducada, o con el agent no registrado en el servidor, NO se abren
+        // entradas nuevas. Cerrar, cancelar y editar SL/TP siguen intactos:
+        // se bloquea tomar riesgo nuevo, nunca gestionar el que ya se tiene.
+        if let Some(b) = self.entry_block() {
+            self.exec.err = Some(b.message());
+            return;
+        }
         let Some(p) = self.selected_pair() else {
             self.exec.err = Some("sin par seleccionado todavía".into());
             return;
@@ -3463,6 +3649,15 @@ impl App {
         });
     }
 
+    /// Motivo por el que las ENTRADAS nuevas están bloqueadas ahora mismo, si
+    /// lo están. Solo aplica al panel real: la maqueta no firma nada.
+    pub fn entry_block(&self) -> Option<EntryBlock> {
+        if !self.exec.real {
+            return None;
+        }
+        self.trade.as_ref()?.entries_blocked()
+    }
+
     /// Abre el modal de confirmación. En mainnet real activa además la frase
     /// reforzada (escribir CONFIRMO): aquí hay dinero de verdad en juego, un
     /// `y` o un click accidental no deben bastar.
@@ -3500,6 +3695,16 @@ impl App {
     /// agent key) y las filas NO se tocan aquí — se refrescan con la verdad
     /// del exchange tras la acción.
     fn exec_confirm_real(&mut self, c: Confirm) {
+        // segunda guarda de la puerta de expiración: entre abrir el modal y
+        // confirmar puede haberse cruzado la medianoche del día −5, o haber
+        // llegado un extraAgents que ya no lista el agent. Solo afecta a la
+        // ENTRADA nueva — un cierre se deja pasar siempre.
+        if matches!(c, Confirm::Order(_)) {
+            if let Some(b) = self.entry_block() {
+                self.exec.err = Some(b.message());
+                return;
+            }
+        }
         let Some(t) = &self.trade else {
             return;
         };
@@ -5182,9 +5387,32 @@ mod tests {
 
     /// Arma el trading real y devuelve el receptor de comandos del trader.
     fn arm(app: &mut App) -> mpsc::UnboundedReceiver<TraderCmd> {
+        arm_exp(app, None)
+    }
+
+    /// Arma el trading con una expiración concreta del agent y lo da por
+    /// verificado en el servidor (el caso normal) — los tests de expiración
+    /// mueven solo la fecha, sin arrastrar el estado de verificación.
+    fn arm_exp(app: &mut App, expires_ms: Option<u64>) -> mpsc::UnboundedReceiver<TraderCmd> {
         let (tx, rx) = mpsc::unbounded_channel();
-        app.arm_trading(MASTER.parse().unwrap(), "0xAGENTEagenteAGENTE".into(), None, tx);
+        app.arm_trading(
+            MASTER.parse().unwrap(),
+            "0xAGENTEagenteAGENTE".into(),
+            expires_ms,
+            true,
+            tx,
+        );
+        app.apply_msg(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::Listed {
+                valid_until_ms: None,
+            },
+        ));
         rx
+    }
+
+    /// Epoch ms dentro de `days` días desde ahora (negativo = en el pasado).
+    fn in_days(days: f64) -> u64 {
+        (crate::wallet::agent::now_ms() as i64 + (days * 86_400_000.0) as i64) as u64
     }
 
     /// Siembra BTC con mid 100k (szDecimals 5, lev máx 40) y lo selecciona.
@@ -5344,6 +5572,237 @@ mod tests {
             "Order must have minimum value of $10.".into(),
         )));
         assert!(app.exec.err.as_deref().unwrap().contains("minimum value"));
+    }
+
+    /// Prepara un panel real con una posición abierta, una límite y un
+    /// trigger, listo para comprobar qué se bloquea y qué no.
+    fn panel_con_posicion(app: &mut App) {
+        pair_btc(app);
+        let master_fmt = app.trade.as_ref().unwrap().master_fmt.clone();
+        let mut s = snap(&master_fmt, 5_000.0);
+        s.positions = vec![pos_btc(0.01)];
+        app.apply_msg(DataMsg::WalletState(s));
+        app.apply_msg(DataMsg::OpenOrders {
+            addr: master_fmt,
+            orders: vec![
+                LiveOrd {
+                    coin: "BTC".into(),
+                    is_buy: false,
+                    kind: "Stop Market".into(),
+                    px: 95_000.0,
+                    sz: 0.01,
+                    oid: 11,
+                    reduce_only: true,
+                    is_trigger: true,
+                },
+                LiveOrd {
+                    coin: "BTC".into(),
+                    is_buy: true,
+                    kind: "Limit".into(),
+                    px: 90_000.0,
+                    sz: 0.01,
+                    oid: 22,
+                    reduce_only: false,
+                    is_trigger: false,
+                },
+            ],
+        });
+        app.view = View::Funds;
+    }
+
+    /// Punto 3 del diseño de expiración: desde el día −5 las ENTRADAS nuevas
+    /// se bloquean, pero cerrar, cancelar y editar SL/TP siguen SIN
+    /// restricción hasta el último momento de validez real. Es la mitad
+    /// crítica: quedarse sin poder proteger una posición abierta sería peor
+    /// que no poder abrir una nueva.
+    #[test]
+    fn dia_menos_5_bloquea_entradas_pero_no_la_gestion_de_lo_abierto() {
+        let (mut app, ..) = test_app();
+        let mut trader_rx = arm_exp(&mut app, Some(in_days(3.0)));
+        panel_con_posicion(&mut app);
+
+        // entrada nueva: ni siquiera abre la confirmación
+        app.exec.size = "200".into();
+        app.exec.lev = 5;
+        app.exec_submit();
+        assert!(app.exec.confirm.is_none(), "no debe abrir confirmación");
+        let err = app.exec.err.clone().unwrap();
+        assert!(err.contains("BLOQUEADAS") || err.contains("BLOCKED"), "{err}");
+        assert!(trader_rx.try_recv().is_err(), "no debe salir ninguna orden");
+
+        // cancelar una orden: sigue funcionando
+        app.exec.focus = Focus::Ord(1);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(
+            matches!(trader_rx.try_recv(), Ok(TraderCmd::Cancel { oid: 22, .. })),
+            "cancelar no se bloquea"
+        );
+
+        // editar SL/TP: sigue funcionando
+        app.exec_sltp_real(0, Some(94_000.0), None);
+        assert!(
+            matches!(trader_rx.try_recv(), Ok(TraderCmd::SetTriggers { .. })),
+            "editar SL/TP no se bloquea"
+        );
+
+        // cerrar la posición: sigue funcionando, confirmación incluida
+        app.exec.focus = Focus::Pos(0);
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Char('y'));
+        assert!(
+            matches!(trader_rx.try_recv(), Ok(TraderCmd::Close { .. })),
+            "cerrar no se bloquea"
+        );
+    }
+
+    /// La puerta tiene dos guardas: la de `exec_submit` (no abre el modal) y
+    /// la de la confirmación. Un modal abierto ANTES de cruzar el umbral no
+    /// debe poder enviar la entrada después — y un cierre sí.
+    #[test]
+    fn la_confirmacion_tambien_guarda_la_puerta_de_expiracion() {
+        let (mut app, ..) = test_app();
+        let mut trader_rx = arm_exp(&mut app, Some(in_days(30.0)));
+        panel_con_posicion(&mut app);
+        app.exec.size = "200".into();
+        app.exec.lev = 5;
+        app.exec_submit();
+        assert!(matches!(app.exec.confirm, Some(Confirm::Order(_))));
+
+        // mientras el modal está abierto, la autorización entra en el tramo
+        // urgente (o el servidor deja de listar el agent)
+        app.trade.as_mut().unwrap().agent_expires_ms = Some(in_days(2.0));
+        press(&mut app, KeyCode::Char('y'));
+        assert!(trader_rx.try_recv().is_err(), "la entrada NO debe salir");
+        assert!(app.exec.err.is_some());
+
+        // el cierre, en cambio, pasa igualmente
+        app.exec.focus = Focus::Pos(0);
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(trader_rx.try_recv(), Ok(TraderCmd::Close { .. })));
+    }
+
+    /// Punto 5: lo que dice el SERVIDOR manda sobre el cálculo local. Un
+    /// agent con fecha local futura pero ausente de extraAgents bloquea
+    /// entradas, y un `validUntil` del servidor sustituye a la fecha local.
+    #[test]
+    fn el_servidor_manda_sobre_la_fecha_local() {
+        let (mut app, ..) = test_app();
+        let _rx = arm_exp(&mut app, Some(in_days(120.0)));
+        pair_btc(&mut app);
+        let master_fmt = app.trade.as_ref().unwrap().master_fmt.clone();
+        app.apply_msg(DataMsg::WalletState(snap(&master_fmt, 5_000.0)));
+
+        // fecha local holgada + listado en el servidor → nada bloqueado
+        assert_eq!(app.entry_block(), None);
+
+        // el servidor da su propio validUntil, más corto: manda ese
+        app.apply_msg(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::Listed {
+                valid_until_ms: Some(in_days(2.5)),
+            },
+        ));
+        assert_eq!(
+            app.entry_block(),
+            Some(EntryBlock::Expiring { days: 2 }),
+            "el validUntil del servidor debe mandar sobre los 120d locales"
+        );
+
+        // el servidor deja de listarlo: bloqueo inmediato aunque la fecha
+        // local siga siendo futura
+        app.apply_msg(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::Listed {
+                valid_until_ms: None,
+            },
+        ));
+        assert_eq!(app.entry_block(), None);
+        app.apply_msg(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::NotListed,
+        ));
+        assert_eq!(app.entry_block(), Some(EntryBlock::NotRegistered));
+
+        // no poder verificar NO es lo mismo que estar revocado: no bloquea
+        app.apply_msg(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::Unknown {
+                error: "timeout".into(),
+            },
+        ));
+        assert_eq!(app.entry_block(), None);
+    }
+
+    /// Un agent ANTIGUO (autorizado sin nombre, sin valid_until en su
+    /// archivo) no aparece necesariamente en `extraAgents` — comprobado
+    /// contra mainnet real: la maestra del proyecto devuelve lista vacía
+    /// teniendo una clave guardada. Tratar esa ausencia como revocación
+    /// bloquearía un panel que quizá funciona, así que se avisa pero NO se
+    /// bloquea; la fecha sí sigue bloqueando igual que en cualquier otro.
+    #[test]
+    fn agent_antiguo_no_se_bloquea_por_no_estar_listado() {
+        let (mut app, ..) = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.arm_trading(
+            MASTER.parse().unwrap(),
+            "0xAGENTEVIEJOviejoAGENT".into(),
+            Some(in_days(60.0)),
+            false, // sin valid_until explícito: clave antigua
+            tx,
+        );
+        app.apply_msg(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::NotListed,
+        ));
+        assert_eq!(
+            app.entry_block(),
+            None,
+            "una clave antigua ausente de extraAgents no prueba revocación"
+        );
+        // pero su fecha sigue mandando igual que en cualquier otro agent
+        app.trade.as_mut().unwrap().agent_expires_ms = Some(in_days(1.0));
+        assert!(matches!(app.entry_block(), Some(EntryBlock::Expiring { .. })));
+    }
+
+    /// El relevo no se puede probar de punta a punta sin firma real, pero sí
+    /// su mecánica de handover: armar con un agent nuevo suelta el TradeArm
+    /// anterior, y con él se cierra el canal del trader viejo — su tarea
+    /// termina sola y el agent anterior deja de firmar.
+    #[test]
+    fn el_relevo_cierra_el_canal_del_agent_anterior() {
+        let (mut app, ..) = test_app();
+        let mut viejo = arm_exp(&mut app, Some(in_days(2.0)));
+        assert!(app.entry_block().is_some(), "el viejo está en el tramo −5d");
+
+        let (tx2, mut nuevo) = mpsc::unbounded_channel();
+        app.arm_trading(
+            MASTER.parse().unwrap(),
+            "0xAGENTNUEVOnuevoAGENT".into(),
+            Some(in_days(180.0)),
+            true,
+            tx2,
+        );
+        // el canal del trader viejo queda cerrado: su bucle recv() termina
+        assert!(
+            matches!(viejo.try_recv(), Err(mpsc::error::TryRecvError::Disconnected)),
+            "el trader anterior debe quedarse sin canal"
+        );
+        // y el contador se resetea con la clave nueva: entradas desbloqueadas
+        app.apply_msg(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::Listed {
+                valid_until_ms: None,
+            },
+        ));
+        assert_eq!(app.entry_block(), None);
+        assert_eq!(app.trade.as_ref().unwrap().agent_addr, "0xAGENTNUEVOnuevoAGENT");
+
+        // el panel enruta ya por el canal NUEVO
+        pair_btc(&mut app);
+        let master_fmt = app.trade.as_ref().unwrap().master_fmt.clone();
+        app.apply_msg(DataMsg::WalletState(snap(&master_fmt, 5_000.0)));
+        app.view = View::Funds;
+        app.exec.size = "200".into();
+        app.exec.lev = 5;
+        app.exec_submit();
+        assert!(app.exec.confirm.is_some(), "{:?}", app.exec.err);
+        press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(nuevo.try_recv(), Ok(TraderCmd::Open { .. })));
     }
 
     /// Modo REAL: el margen disponible (perps_avail) bloquea el envío ANTES

@@ -1168,6 +1168,36 @@ pub fn spawn_orders_watcher(base: BaseUrl, tx: UnboundedSender<DataMsg>, master:
     });
 }
 
+/// Cada cuánto se re-verifica contra el servidor que el agent armado sigue
+/// registrado. La comprobación de arranque es la que importa; el ciclo cubre
+/// una revocación hecha desde fuera (la web oficial, otro cliente) sin tener
+/// que reiniciar el TUI.
+const AGENT_CHECK_SECS: u64 = 300;
+
+/// Verificación REAL del agent armado contra `extraAgents` (punto 5 del
+/// diseño de expiración): al arrancar con el panel armado, y luego cada pocos
+/// minutos. Es la fuente autoritativa — el cálculo local de la expiración sale
+/// de un archivo en disco que puede haber quedado obsoleto.
+pub fn spawn_agent_registration_watcher(
+    base: BaseUrl,
+    tx: UnboundedSender<DataMsg>,
+    master: Address,
+    agent: String,
+) {
+    tokio::spawn(async move {
+        let api = info_api(base);
+        let user = format!("{master}");
+        let _ = tx.send(DataMsg::AgentReg(
+            crate::wallet::agent::Registration::Checking,
+        ));
+        loop {
+            let reg = crate::wallet::agent::check_registration(api, &user, &agent).await;
+            let _ = tx.send(DataMsg::AgentReg(reg));
+            sleep(Duration::from_secs(AGENT_CHECK_SECS)).await;
+        }
+    });
+}
+
 /// Saldo SPOT dentro de Hyperliquid (spotClearinghouseState) + modo de
 /// cuenta (userAbstraction) de la maestra WC — separado a propósito del
 /// clearinghouseState de perps: son dos saldos distintos y el faucet de
