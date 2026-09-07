@@ -26,28 +26,54 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{FontSize, Image, Resize};
 
+use super::theme::{self, Theme};
+
 /// Factor de supersampling: se rasteriza a SSx y se reduce con Lanczos.
 const SS: u32 = 2;
 
-// Paleta del raster: fondo/banda del spike; series en los tonos que ya usa la
-// paleta ANSI del TUI (verde/rojo/amarillo/azul/magenta/gris de siempre).
-const BG: RGBColor = RGBColor(13, 17, 23);
-const BAND: RGBColor = RGBColor(23, 29, 41);
-const LEVEL_LO: RGBColor = RGBColor(52, 112, 70);
-const LEVEL_MID: RGBColor = RGBColor(66, 72, 84);
-const LEVEL_HI: RGBColor = RGBColor(132, 58, 66);
-pub(super) const GREEN: RGBColor = RGBColor(63, 185, 106);
-pub(super) const RED: RGBColor = RGBColor(229, 83, 90);
-pub(super) const YELLOW: RGBColor = RGBColor(229, 192, 90);
-pub(super) const BLUE: RGBColor = RGBColor(88, 166, 255);
-pub(super) const MAGENTA: RGBColor = RGBColor(198, 120, 221);
-pub(super) const GRAY: RGBColor = RGBColor(139, 148, 158);
-pub(super) const DIM_GREEN: RGBColor = RGBColor(52, 112, 70);
-pub(super) const CYAN: RGBColor = RGBColor(86, 182, 194);
-pub(super) const BAR_BUY: RGBColor = RGBColor(0, 110, 60);
-pub(super) const BAR_SELL: RGBColor = RGBColor(150, 35, 45);
-const MARK_BUY: RGBColor = RGBColor(86, 211, 128);
-const MARK_SELL: RGBColor = RGBColor(248, 106, 113);
+// Paleta del raster: NO vive aquí. Sale de `theme::raster()`, igual que los
+// colores de texto salen de `theme::c()`, para que el toggle de tema
+// (tecla `T`) recolore también las imágenes de los paneles y no solo el
+// texto de alrededor. Los tonos semánticos son los mismos: verde de marca
+// para alcista/positivo, coral para bajista/negativo, fondo del tema activo.
+
+fn rgb(c: [u8; 3]) -> RGBColor {
+    RGBColor(c[0], c[1], c[2])
+}
+
+fn bg() -> RGBColor {
+    rgb(theme::raster().bg)
+}
+pub(super) fn green() -> RGBColor {
+    rgb(theme::raster().green)
+}
+pub(super) fn red() -> RGBColor {
+    rgb(theme::raster().red)
+}
+pub(super) fn yellow() -> RGBColor {
+    rgb(theme::raster().yellow)
+}
+pub(super) fn blue() -> RGBColor {
+    rgb(theme::raster().blue)
+}
+pub(super) fn magenta() -> RGBColor {
+    rgb(theme::raster().magenta)
+}
+pub(super) fn gray() -> RGBColor {
+    rgb(theme::raster().gray)
+}
+pub(super) fn dim_green() -> RGBColor {
+    rgb(theme::raster().dim_green)
+}
+pub(super) fn cyan() -> RGBColor {
+    rgb(theme::raster().cyan)
+}
+pub(super) fn bar_buy() -> RGBColor {
+    rgb(theme::raster().bar_buy)
+}
+pub(super) fn bar_sell() -> RGBColor {
+    rgb(theme::raster().bar_sell)
+}
 
 /// Protocolo gráfico + caché de imagen por panel. Vive en `App` (como los
 /// `TableState`): estado de UI que persiste entre frames.
@@ -68,6 +94,9 @@ pub struct Gfx {
 struct Cached {
     size: Size,
     stamp: Instant,
+    /// Tema activo al rasterizar: el toggle claro/oscuro recolorea la imagen,
+    /// así que invalida el caché igual que un cambio de datos o de tamaño.
+    theme: Theme,
     /// Selección de indicadores visibles: mismas velas + distinta selección
     /// también debe re-rasterizar (el `stamp` solo cubre los datos).
     key: u64,
@@ -77,6 +106,8 @@ struct Cached {
 struct DeltaCached {
     size: Size,
     key: u64,
+    /// Ver `Cached::theme`.
+    theme: Theme,
     proto: Protocol,
 }
 
@@ -123,11 +154,11 @@ impl Gfx {
 /// (aquel devuelve `ratatui::Color` para los textos; este alimenta la imagen).
 pub(super) fn rsi_zone_rgb(v: f64, wp: &crate::signals::WhaleParams) -> RGBColor {
     if v >= wp.overbought {
-        RED
+        red()
     } else if v <= wp.oversold {
-        GREEN
+        green()
     } else {
-        MAGENTA
+        magenta()
     }
 }
 
@@ -201,10 +232,9 @@ pub(super) fn draw_into(
         OscSlot::WhaleRsi => whalersi,
     };
     let size = Size::new(area.width, area.height);
-    if !cache
-        .as_ref()
-        .is_some_and(|c| c.size == size && c.stamp == stamp && c.key == key)
-    {
+    if !cache.as_ref().is_some_and(|c| {
+        c.size == size && c.stamp == stamp && c.key == key && c.theme == theme::theme()
+    }) {
         let fs = picker.font_size();
         let (pw, ph) = (
             area.width as u32 * fs.width as u32,
@@ -223,6 +253,7 @@ pub(super) fn draw_into(
                     size,
                     stamp,
                     key,
+                    theme: theme::theme(),
                     proto,
                 });
             }
@@ -262,7 +293,7 @@ pub(super) fn draw_delta_into(f: &mut Frame, area: Rect, gfx: &mut Gfx, key: u64
     let size = Size::new(area.width, area.height);
     if !pair_delta
         .as_ref()
-        .is_some_and(|c| c.size == size && c.key == key)
+        .is_some_and(|c| c.size == size && c.key == key && c.theme == theme::theme())
     {
         let fs = picker.font_size();
         let (pw, ph) = (
@@ -275,7 +306,14 @@ pub(super) fn draw_delta_into(f: &mut Frame, area: Rect, gfx: &mut Gfx, key: u64
         }
         let img = raster_delta(pw, ph, fs.width as u32, &spec);
         match picker.new_protocol(DynamicImage::ImageRgb8(img), size, Resize::Fit(None)) {
-            Ok(proto) => *pair_delta = Some(DeltaCached { size, key, proto }),
+            Ok(proto) => {
+                *pair_delta = Some(DeltaCached {
+                    size,
+                    key,
+                    theme: theme::theme(),
+                    proto,
+                })
+            }
             Err(_) => {
                 *pair_delta = None;
                 return;
@@ -294,7 +332,7 @@ fn raster_delta(pw: u32, ph: u32, cell_w: u32, spec: &DeltaSpec) -> RgbImage {
     let mut buf = vec![0u8; (bw * bh * 3) as usize];
     {
         let root = BitMapBackend::with_buffer(&mut buf, (bw, bh)).into_drawing_area();
-        root.fill(&BG).unwrap();
+        root.fill(&bg()).unwrap();
         let w = pw as f64;
         // eje Y simétrico -1..1 (delta normalizado); cero en el centro
         let mut chart = ChartBuilder::on(&root)
@@ -308,7 +346,7 @@ fn raster_delta(pw: u32, ph: u32, cell_w: u32, spec: &DeltaSpec) -> RgbImage {
         chart
             .draw_series(std::iter::once(PathElement::new(
                 [(0.0, 0.0), (w, 0.0)],
-                LEVEL_MID.stroke_width(SS),
+                rgb(theme::raster().level_mid).stroke_width(SS),
             )))
             .unwrap();
 
@@ -325,7 +363,7 @@ fn raster_delta(pw: u32, ph: u32, cell_w: u32, spec: &DeltaSpec) -> RgbImage {
             }
             let x = x_of(i);
             let h = (v / max).clamp(-1.0, 1.0);
-            let col = if *v >= 0.0 { BAR_BUY } else { BAR_SELL };
+            let col = if *v >= 0.0 { bar_buy() } else { bar_sell() };
             chart
                 .draw_series(std::iter::once(Rectangle::new(
                     [(x - half, 0.0), (x + half, h)],
@@ -351,7 +389,7 @@ fn raster(pw: u32, ph: u32, cell_w: u32, spec: &OscSpec) -> RgbImage {
     {
         // backend en memoria: los draw solo fallan por E/S, aquí imposible
         let root = BitMapBackend::with_buffer(&mut buf, (bw, bh)).into_drawing_area();
-        root.fill(&BG).unwrap();
+        root.fill(&bg()).unwrap();
         let w = pw as f64;
         let mut chart = ChartBuilder::on(&root)
             .margin(0)
@@ -363,13 +401,14 @@ fn raster(pw: u32, ph: u32, cell_w: u32, spec: &OscSpec) -> RgbImage {
         chart
             .draw_series(std::iter::once(Rectangle::new(
                 [(0.0, spec.oversold), (w, spec.overbought)],
-                BAND.filled(),
+                rgb(theme::raster().band).filled(),
             )))
             .unwrap();
+        let r = theme::raster();
         for (lvl, col) in [
-            (spec.oversold, LEVEL_LO),
-            (50.0, LEVEL_MID),
-            (spec.overbought, LEVEL_HI),
+            (spec.oversold, rgb(r.level_lo)),
+            (50.0, rgb(r.level_mid)),
+            (spec.overbought, rgb(r.level_hi)),
         ] {
             chart
                 .draw_series(DashedLineSeries::new(
@@ -402,11 +441,14 @@ fn raster(pw: u32, ph: u32, cell_w: u32, spec: &OscSpec) -> RgbImage {
         for &(idx, buy) in spec.marks.iter().filter(|(i, _)| visible(*i)) {
             let x = x_of(idx - spec.start);
             let (pts, col) = if buy {
-                (vec![(x, 8.0), (x - half, 2.0), (x + half, 2.0)], MARK_BUY)
+                (
+                    vec![(x, 8.0), (x - half, 2.0), (x + half, 2.0)],
+                    rgb(theme::raster().mark_buy),
+                )
             } else {
                 (
                     vec![(x, 92.0), (x - half, 98.0), (x + half, 98.0)],
-                    MARK_SELL,
+                    rgb(theme::raster().mark_sell),
                 )
             };
             chart
@@ -430,7 +472,7 @@ fn draw_line(chart: &mut OscChart, spec: &OscSpec, line: &OscLine, x_of: &dyn Fn
     };
     let stroke = line.width * SS;
     let mut run: Vec<(f64, f64)> = Vec::new();
-    let mut run_color = BG;
+    let mut run_color = bg();
     let flush = |run: &mut Vec<(f64, f64)>, col: RGBColor, chart: &mut OscChart| {
         match run.len() {
             0 => {}

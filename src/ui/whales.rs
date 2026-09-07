@@ -20,7 +20,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     // una línea extra en los modos de PnL para la cobertura del escaneo: el
     // ranking de PnL solo es legible sabiendo de cuántas cuentas se sabe algo
     let head_h = if app.whale_sort.is_pnl() { 5 } else { 4 };
-    let rows_layout = Layout::vertical([Constraint::Length(head_h), Constraint::Min(3)]).split(area);
+    let rows_layout =
+        Layout::vertical([Constraint::Length(head_h), Constraint::Min(3)]).split(area);
 
     draw_summary(f, app, rows_layout[0]);
     draw_table(f, app, rows_layout[1]);
@@ -275,8 +276,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 // primera fila del grupo puede quedar fuera de pantalla y el
                 // dato desaparecería justo cuando se está mirando.
                 let cell = match agg {
-                    Some(v) if *first_of_whale => Cell::from(fmt_usd(*v))
-                        .style(Style::new().fg(sign_color(Some(*v), false))),
+                    Some(v) if *first_of_whale => {
+                        Cell::from(fmt_usd(*v)).style(Style::new().fg(sign_color(Some(*v), false)))
+                    }
                     Some(v) => Cell::from(fmt_usd(*v)).style(Style::new().fg(Color::DarkGray)),
                     None => Cell::from("—").style(Style::new().fg(Color::DarkGray)),
                 };

@@ -1525,6 +1525,7 @@ static HELP_EN: &[HelpRow] = &[
     ),
     HelpRow::Key("Tab", "next view"),
     HelpRow::Key("L", "toggle language (EN/ES)"),
+    HelpRow::Key("T", "toggle theme (dark/light)"),
     HelpRow::Key("?", "this help"),
     HelpRow::Key("q / Ctrl-C", "quit"),
     HelpRow::Blank,
@@ -1543,7 +1544,10 @@ static HELP_EN: &[HelpRow] = &[
     HelpRow::Section(" Pair and W+RSI"),
     HelpRow::Key("←→ / h l", "previous / next pair"),
     HelpRow::Key("i", "candle timeframe (1m/5m/15m/1h/4h/12h/1d/1w)"),
-    HelpRow::Key("o", "indicator selector (RSI/ADX·DMI/TRIX; view 3: TRIX only)"),
+    HelpRow::Key(
+        "o",
+        "indicator selector (RSI/ADX·DMI/TRIX; view 3: TRIX only)",
+    ),
     HelpRow::Key("mouse", "hover a candle shows its OHLC (Pair)"),
     HelpRow::Key("u", "reload candles and funding"),
     HelpRow::Key("Esc", "back to ranking"),
@@ -1570,7 +1574,10 @@ static HELP_EN: &[HelpRow] = &[
     HelpRow::Key("r", "price range ±5/15/30% (liqs)"),
     HelpRow::Blank,
     HelpRow::Section(" Funds (real balance · REAL execution on testnet with agent)"),
-    HelpRow::Key("c / d", "connect / disconnect wallet (WalletConnect QR — any EVM wallet)"),
+    HelpRow::Key(
+        "c / d",
+        "connect / disconnect wallet (WalletConnect QR — any EVM wallet)",
+    ),
     HelpRow::Key(
         "p",
         "deposit USDC to bridge (REAL · min 5 USDC · double confirm)",
@@ -1612,6 +1619,7 @@ static HELP_ES: &[HelpRow] = &[
     ),
     HelpRow::Key("Tab", "vista siguiente"),
     HelpRow::Key("L", "cambiar idioma (EN/ES)"),
+    HelpRow::Key("T", "cambiar tema (oscuro/claro)"),
     HelpRow::Key("?", "esta ayuda"),
     HelpRow::Key("q / Ctrl-C", "salir"),
     HelpRow::Blank,
@@ -1630,7 +1638,10 @@ static HELP_ES: &[HelpRow] = &[
     HelpRow::Section(" Par y B+RSI"),
     HelpRow::Key("←→ / h l", "par anterior / siguiente"),
     HelpRow::Key("i", "temporalidad velas (1m/5m/15m/1h/4h/12h/1d/1w)"),
-    HelpRow::Key("o", "selector de indicadores (RSI/ADX·DMI/TRIX; vista 3: solo TRIX)"),
+    HelpRow::Key(
+        "o",
+        "selector de indicadores (RSI/ADX·DMI/TRIX; vista 3: solo TRIX)",
+    ),
     HelpRow::Key("ratón", "hover sobre una vela muestra su OHLC (Par)"),
     HelpRow::Key("u", "recargar velas y funding"),
     HelpRow::Key("Esc", "volver al ranking"),
@@ -1640,7 +1651,10 @@ static HELP_ES: &[HelpRow] = &[
     HelpRow::Blank,
     HelpRow::Section(" Whales / Wallet / Liqs"),
     HelpRow::Key("↑↓ / j k", "desplazar posiciones (whales)"),
-    HelpRow::Key("s", "ciclar orden: notional / uPnL de cuenta ↓ / ↑ (whales)"),
+    HelpRow::Key(
+        "s",
+        "ciclar orden: notional / uPnL de cuenta ↓ / ↑ (whales)",
+    ),
     HelpRow::Key(
         "Enter/click",
         "ver dirección completa de whale · c copia (whales)",

@@ -144,7 +144,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     // solo el conteo. El hint de teclas conserva su sitio mínimo.
     let err_w = if app.last_err.is_some() {
         let hint_w = hint.chars().count() as u16 + 2;
-        (area.width.saturating_sub(hint_w)).clamp(46, 200).min(area.width)
+        (area.width.saturating_sub(hint_w))
+            .clamp(46, 200)
+            .min(area.width)
     } else {
         46
     };
@@ -184,7 +186,15 @@ mod tests {
         let (usdc_tx, _u) = watch::channel(None);
         let (coin_tx, _c) = watch::channel(None);
         let (wc_tx, _wc) = mpsc::unbounded_channel();
-        let mut app = App::new(extra_tx, wallet_tx, usdc_tx, coin_tx, wc_tx, "test", Gfx::new());
+        let mut app = App::new(
+            extra_tx,
+            wallet_tx,
+            usdc_tx,
+            coin_tx,
+            wc_tx,
+            "test",
+            Gfx::new(),
+        );
         app.apply_msg(DataMsg::RestError(err.to_string()));
         app
     }
@@ -210,7 +220,12 @@ mod tests {
             app.last_err = None; // silencia el aviso de no-usado tras el draw
             let b = term.backend().buffer().clone();
             (0..b.area.width)
-                .map(|x| b.cell((x, 2)).map(|c| c.symbol()).unwrap_or(" ").to_string())
+                .map(|x| {
+                    b.cell((x, 2))
+                        .map(|c| c.symbol())
+                        .unwrap_or(" ")
+                        .to_string()
+                })
                 .collect::<String>()
         };
         // terminal ancha: la dirección completa y el error real sobreviven

@@ -2,23 +2,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
 use crate::app::{App, SortCol, OI_WIN_LONG, OI_WIN_SHORT};
-use crate::signals::Regime;
 
 use super::fmt::{fmt_opt, fmt_opt_pct, fmt_px, fmt_usd};
 use super::theme;
-
-/// Color de la clasificación de flujo para las vistas que NO están en el
-/// piloto del tema. La Vista 1 usa `theme::regime_color`; esta se queda con
-/// los colores de antes porque la comparte la Vista 2.
-pub fn regime_color(r: Regime) -> Color {
-    match r {
-        Regime::LongBuild => Color::Green,
-        Regime::ShortBuild => Color::Red,
-        Regime::ShortCover => Color::Cyan,
-        Regime::LongUnwind => Color::Magenta,
-        Regime::Flat => Color::DarkGray,
-    }
-}
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     // con el buscador abierto la tabla muestra los resultados filtrados y el
@@ -70,22 +56,22 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             let reg = p.regime(OI_WIN_LONG);
             let sign = |v: Option<f64>, invert: bool| Style::new().fg(theme::sign_color(v, invert));
             Some(Row::new(vec![
-                Cell::from(format!("{:>3}", i + 1)).style(Style::new().fg(theme::MUTED)),
+                Cell::from(format!("{:>3}", i + 1)).style(Style::new().fg(theme::c().muted)),
                 Cell::from(name.clone()).style(
                     Style::new()
-                        .fg(theme::FG_STRONG)
+                        .fg(theme::c().fg_strong)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Cell::from(fmt_px(p.mid)).style(Style::new().fg(theme::FG)),
+                Cell::from(fmt_px(p.mid)).style(Style::new().fg(theme::c().fg)),
                 Cell::from(fmt_opt_pct(chg, 2)).style(sign(chg, false)),
                 Cell::from(fmt_opt(f_h, 4)).style(sign(f_h, true)),
                 Cell::from(fmt_opt_pct(apr, 1)).style(sign(apr, true)),
                 Cell::from(fmt_opt(prem, 1)).style(sign(prem, true)),
-                Cell::from(fmt_usd(p.oi_notional())).style(Style::new().fg(theme::FG)),
+                Cell::from(fmt_usd(p.oi_notional())).style(Style::new().fg(theme::c().fg)),
                 Cell::from(fmt_opt_pct(d5, 2)).style(sign(d5, false)),
                 Cell::from(fmt_opt_pct(d1h, 2)).style(sign(d1h, false)),
                 Cell::from(reg.label()).style(Style::new().fg(theme::regime_color(reg))),
-                Cell::from(fmt_usd(p.volume24())).style(Style::new().fg(theme::FG)),
+                Cell::from(fmt_usd(p.volume24())).style(Style::new().fg(theme::c().fg)),
             ]))
         })
         .collect();
@@ -136,7 +122,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .block(block)
         .style(theme::base())
         .row_highlight_style(theme::row_highlight())
-        .highlight_symbol(Span::styled("▶", Style::new().fg(theme::CURSOR)));
+        .highlight_symbol(Span::styled("▶", Style::new().fg(theme::c().cursor)));
 
     let hi = if searching { app.search.sel } else { app.sel };
     app.table_state

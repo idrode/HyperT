@@ -1,15 +1,15 @@
 use ratatui::prelude::*;
 use ratatui::symbols;
-use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph, Sparkline};
+use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Paragraph, Sparkline};
 
 use crate::app::{App, DeltaState, PairState, OI_WIN_LONG, OI_WIN_SHORT};
 use crate::data::types::CandlePoint;
 use crate::signals::WhaleParams;
 
-use super::fmt::{age_label, fmt_opt_pct, fmt_px, fmt_usd, sign_color, time_label};
+use super::fmt::{age_label, fmt_opt_pct, fmt_px, fmt_usd, time_label};
 use super::oscimg::{self, DeltaSpec, LineColor, OscLine, OscSpec};
-use super::ranking::regime_color;
 use super::taplot;
+use super::theme;
 use super::whalersi::rsi_zone_color;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(p) = app.selected_coin.as_deref().and_then(|c| app.pairs.get(c)) else {
         let s = crate::i18n::t();
         f.render_widget(
-            Paragraph::new(s.pr_select_pair).block(Block::bordered().title(s.pr_word_pair)),
+            Paragraph::new(s.pr_select_pair).block(theme::block().title(s.pr_word_pair)),
             area,
         );
         return;
@@ -83,7 +83,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         f,
         crate::i18n::t().pr_spark_oi,
         &oi_series,
-        Color::Yellow,
+        theme::c().accent_amber,
         bottom[0],
     );
     let mid_series: Vec<f64> = p.mid_hist.iter().map(|(_, m)| *m).collect();
@@ -91,7 +91,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         f,
         crate::i18n::t().pr_spark_mid,
         &mid_series,
-        Color::Cyan,
+        theme::c().accent_cyan,
         bottom[1],
     );
 }
@@ -110,7 +110,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
     };
 
     let bold = |s: String| Span::styled(s, Style::new().add_modifier(Modifier::BOLD));
-    let dim = |s: &'static str| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: &'static str| Span::styled(s, Style::new().fg(theme::c().muted));
     let colored = |s: String, c: Color| Span::styled(s, Style::new().fg(c));
 
     let tr = crate::i18n::t();
@@ -118,23 +118,25 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
         Line::from(vec![
             Span::styled(
                 format!("{} ", p.meta.name),
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().accent_cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             bold(fmt_px(p.mid)),
             dim(tr.pr_24h),
-            colored(fmt_opt_pct(chg, 2), sign_color(chg, false)),
+            colored(fmt_opt_pct(chg, 2), theme::sign_color(chg, false)),
             dim(tr.pr_max_lev),
             Span::raw(format!("{}×", p.meta.max_leverage)),
         ]),
         Line::from(vec![
             dim(tr.pr_funding),
-            colored(fmt_opt_pct(f_h, 4), sign_color(f_h, true)),
+            colored(fmt_opt_pct(f_h, 4), theme::sign_color(f_h, true)),
             dim("/h ("),
-            colored(fmt_opt_pct(apr, 1), sign_color(apr, true)),
+            colored(fmt_opt_pct(apr, 1), theme::sign_color(apr, true)),
             dim(tr.pr_apr_premium),
             colored(
                 format!("{} bp", super::fmt::fmt_opt(prem, 1)),
-                sign_color(prem, true),
+                theme::sign_color(prem, true),
             ),
             dim(tr.pr_oracle),
             Span::raw(fmt_px(oracle)),
@@ -149,9 +151,9 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
             dim("("),
             Span::raw(fmt_usd(p.oi_notional())),
             dim(")   ΔOI 5m "),
-            colored(fmt_opt_pct(d5, 2), sign_color(d5, false)),
+            colored(fmt_opt_pct(d5, 2), theme::sign_color(d5, false)),
             dim("  1h "),
-            colored(fmt_opt_pct(d1h, 2), sign_color(d1h, false)),
+            colored(fmt_opt_pct(d1h, 2), theme::sign_color(d1h, false)),
             dim(tr.pr_vol24),
             Span::raw(fmt_usd(p.volume24())),
         ]),
@@ -160,7 +162,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
             Span::styled(
                 reg.label(),
                 Style::new()
-                    .fg(regime_color(reg))
+                    .fg(theme::regime_color(reg))
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -173,11 +175,11 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
             let rsi_span = match e.rsi {
                 Some(r) => {
                     let c = if r >= 70.0 {
-                        Color::Red
+                        theme::c().negative
                     } else if r <= 30.0 {
-                        Color::Green
+                        theme::c().positive
                     } else {
-                        Color::White
+                        theme::c().neutral
                     };
                     Span::styled(format!("{r:.0}"), Style::new().fg(c))
                 }
@@ -187,16 +189,16 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
                 Some(d) => vec![
                     Span::raw(format!("{:.0}", d.adx)),
                     dim("  +DI "),
-                    colored(format!("{:.0}", d.plus_di), Color::Green),
+                    colored(format!("{:.0}", d.plus_di), theme::c().positive),
                     dim(" −DI "),
-                    colored(format!("{:.0}", d.minus_di), Color::Red),
+                    colored(format!("{:.0}", d.minus_di), theme::c().negative),
                 ],
                 None => vec![Span::raw("—")],
             };
             let mut spans = vec![
                 Span::styled(
                     format!("{} ({tf}): RSI(14) ", tr.pr_confirmation),
-                    Style::new().fg(Color::DarkGray),
+                    Style::new().fg(theme::c().muted),
                 ),
                 rsi_span,
                 dim("   ADX(14) "),
@@ -210,7 +212,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, area: Rect) {
 
     f.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(format!(" {}{}", p.meta.name, tr.pr_perp))),
+            .block(theme::block().title(format!(" {}{}", p.meta.name, tr.pr_perp))),
         area,
     );
 }
@@ -249,7 +251,7 @@ fn draw_price_chart(f: &mut Frame, p: &PairState, hover: Option<usize>, area: Re
     let tr = crate::i18n::t();
     let placeholder = |f: &mut Frame, msg: &str| {
         f.render_widget(
-            Paragraph::new(msg.to_string()).block(Block::bordered().title(tr.pr_candles_tf)),
+            Paragraph::new(msg.to_string()).block(theme::block().title(tr.pr_candles_tf)),
             area,
         );
     };
@@ -261,7 +263,7 @@ fn draw_price_chart(f: &mut Frame, p: &PairState, hover: Option<usize>, area: Re
         placeholder(f, tr.t_no_candles);
         return;
     }
-    let inner = Block::bordered().inner(area);
+    let inner = theme::block().inner(area);
     if inner.width < AXIS_W + 4 * CANDLE_CELLS || inner.height < 4 {
         placeholder(f, "");
         return;
@@ -282,12 +284,12 @@ fn draw_price_chart(f: &mut Frame, p: &PairState, hover: Option<usize>, area: Re
 
     let last = vis.last().unwrap();
     let last_color = if last.close >= last.open {
-        Color::Green
+        theme::c().candle_up
     } else {
-        Color::Red
+        theme::c().candle_down
     };
 
-    let mut block = Block::bordered().title(format!(
+    let mut block = theme::block().title(format!(
         " {} {} ×{}{}",
         tr.pr_word_candles,
         e.interval.label(),
@@ -315,14 +317,14 @@ fn draw_price_chart(f: &mut Frame, p: &PairState, hover: Option<usize>, area: Re
     for frac in [0.25, 0.5, 0.75] {
         let y = chart.y + (srow(ymin + span * frac) / 2) as u16;
         for x in chart.left()..chart.right() {
-            buf[(x, y)].set_symbol("─").set_fg(Color::Rgb(50, 52, 60));
+            buf[(x, y)].set_symbol("─").set_fg(theme::c().grid);
         }
     }
     let y_last = chart.y + (srow(last.close) / 2) as u16;
     for x in chart.left()..chart.right() {
         buf[(x, y_last)]
             .set_symbol("╌")
-            .set_fg(Color::Rgb(90, 90, 60));
+            .set_fg(theme::c().crosshair);
     }
 
     for (i, c) in vis.iter().enumerate() {
@@ -330,10 +332,10 @@ fn draw_price_chart(f: &mut Frame, p: &PairState, hover: Option<usize>, area: Re
         // la vela bajo el cursor se resalta en su variante clara
         let up = c.close >= c.open;
         let color = match (up, hover == Some(i)) {
-            (true, false) => Color::Green,
-            (false, false) => Color::Red,
-            (true, true) => Color::LightGreen,
-            (false, true) => Color::LightRed,
+            (true, false) => theme::c().candle_up,
+            (false, false) => theme::c().candle_down,
+            (true, true) => theme::c().candle_up_hi,
+            (false, true) => theme::c().candle_down_hi,
         };
         let x = chart.x + i as u16 * CANDLE_CELLS;
         let (s_hi, s_lo) = (srow(c.high), srow(c.low));
@@ -367,7 +369,7 @@ fn draw_price_chart(f: &mut Frame, p: &PairState, hover: Option<usize>, area: Re
     let mut labels: Vec<Line> = vec![Line::raw(""); h];
     for frac in [0.0, 0.25, 0.5, 0.75, 1.0] {
         let v = ymax - span * frac;
-        labels[row_of(v)] = Line::from(Span::styled(fmt_px(v), Style::new().fg(Color::DarkGray)));
+        labels[row_of(v)] = Line::from(Span::styled(fmt_px(v), Style::new().fg(theme::c().muted)));
     }
     labels[row_of(last.close)] = Line::from(Span::styled(
         format!("▶{}", fmt_px(last.close)),
@@ -399,30 +401,36 @@ fn draw_ta_panel(
         }
     };
     if ind.rsi {
-        tspans.push(Span::styled("RSI", Style::new().fg(Color::Magenta)));
-        tspans.push(Span::styled(" · MA", Style::new().fg(Color::Yellow)));
+        tspans.push(Span::styled(
+            "RSI",
+            Style::new().fg(theme::c().accent_magenta),
+        ));
+        tspans.push(Span::styled(
+            " · MA",
+            Style::new().fg(theme::c().accent_amber),
+        ));
     }
     if ind.adx_dmi {
         sep(&mut tspans);
-        tspans.push(Span::styled("ADX", Style::new().fg(Color::Gray)));
-        tspans.push(Span::styled(" · +DI", Style::new().fg(Color::Green)));
-        tspans.push(Span::styled(" · −DI", Style::new().fg(Color::Red)));
+        tspans.push(Span::styled("ADX", Style::new().fg(theme::c().neutral)));
+        tspans.push(Span::styled(" · +DI", Style::new().fg(theme::c().positive)));
+        tspans.push(Span::styled(" · −DI", Style::new().fg(theme::c().negative)));
     }
     if ind.trix {
         sep(&mut tspans);
         tspans.push(Span::styled(
             format!("TRIX({})", crate::signals::TRIX_PERIOD),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(theme::c().accent_cyan),
         ));
     }
     if tspans.len() == 1 {
         tspans.push(Span::styled(
             crate::i18n::t().pr_ind_none.to_string(),
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(theme::c().muted),
         ));
     }
     tspans.push(Span::raw(crate::i18n::t().pr_same_axis));
-    let mut block = Block::bordered().title(Line::from(tspans));
+    let mut block = theme::block().title(Line::from(tspans));
     let Some(e) = &p.extra else {
         f.render_widget(
             Paragraph::new(crate::i18n::t().t_loading_candles).block(block),
@@ -498,31 +506,31 @@ fn draw_ta_panel(
         lines.push(OscLine {
             vals: &adx,
             width: 1,
-            color: LineColor::Fixed(oscimg::GRAY),
+            color: LineColor::Fixed(oscimg::gray()),
         });
         lines.push(OscLine {
             vals: &pdi,
             width: 1,
-            color: LineColor::Fixed(oscimg::GREEN),
+            color: LineColor::Fixed(oscimg::green()),
         });
         lines.push(OscLine {
             vals: &mdi,
             width: 1,
-            color: LineColor::Fixed(oscimg::RED),
+            color: LineColor::Fixed(oscimg::red()),
         });
     }
     if ind.trix {
         lines.push(OscLine {
             vals: &trix_scaled,
             width: if ind.rsi { 1 } else { 2 },
-            color: LineColor::Fixed(oscimg::CYAN),
+            color: LineColor::Fixed(oscimg::cyan()),
         });
     }
     if ind.rsi {
         lines.push(OscLine {
             vals: &panel.rsi_ma,
             width: 1,
-            color: LineColor::Fixed(oscimg::YELLOW),
+            color: LineColor::Fixed(oscimg::yellow()),
         });
         lines.push(OscLine {
             vals: &panel.rsi,
@@ -560,9 +568,9 @@ fn draw_ta_panel(
     };
     let mut labels: Vec<Line> = vec![Line::raw(""); h];
     for (v, c) in [
-        (wp.overbought, Color::Rgb(150, 70, 75)),
-        (50.0, Color::DarkGray),
-        (wp.oversold, Color::Rgb(60, 130, 80)),
+        (wp.overbought, theme::c().negative_dim),
+        (50.0, theme::c().muted),
+        (wp.oversold, theme::c().positive_dim),
     ] {
         labels[row_of(v)] = Line::from(Span::styled(format!("{v:.0}"), Style::new().fg(c)));
     }
@@ -595,11 +603,11 @@ fn draw_delta_panel(
     area: Rect,
 ) {
     let tr = crate::i18n::t();
-    let mut block = Block::bordered().title(Line::from(vec![
+    let mut block = theme::block().title(Line::from(vec![
         Span::raw(tr.pr_delta_candle),
-        Span::styled(tr.pr_buy, Style::new().fg(Color::Green)),
+        Span::styled(tr.pr_buy, Style::new().fg(theme::c().positive)),
         Span::raw("−"),
-        Span::styled(tr.pr_sell, Style::new().fg(Color::Red)),
+        Span::styled(tr.pr_sell, Style::new().fg(theme::c().negative)),
         Span::raw(tr.pr_aggressor_axis),
     ]));
     let Some(e) = &p.extra else {
@@ -663,14 +671,14 @@ fn draw_delta_panel(
         let mut labels: Vec<Line> = vec![Line::raw(""); h];
         labels[0] = Line::from(Span::styled(
             format!("+{}", fmt_usd(max)),
-            Style::new().fg(Color::Green),
+            Style::new().fg(theme::c().positive),
         ));
         labels[h - 1] = Line::from(Span::styled(
             format!("-{}", fmt_usd(max)),
-            Style::new().fg(Color::Red),
+            Style::new().fg(theme::c().negative),
         ));
         if h >= 3 {
-            labels[h / 2] = Line::from(Span::styled("0", Style::new().fg(Color::DarkGray)));
+            labels[h / 2] = Line::from(Span::styled("0", Style::new().fg(theme::c().muted)));
         }
         f.render_widget(Paragraph::new(labels), axis);
     }
@@ -679,13 +687,17 @@ fn draw_delta_panel(
 /// Línea OHLC de la vela bajo el cursor (borde inferior del gráfico).
 fn hover_line(c: &CandlePoint) -> Line<'static> {
     let up = c.close >= c.open;
-    let color = if up { Color::Green } else { Color::Red };
+    let color = if up {
+        theme::c().candle_up
+    } else {
+        theme::c().candle_down
+    };
     let chg = if c.open > 0.0 {
         (c.close / c.open - 1.0) * 100.0
     } else {
         0.0
     };
-    let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: String| Span::styled(s, Style::new().fg(theme::c().muted));
     Line::from(vec![
         dim(" O ".into()),
         Span::raw(fmt_px(c.open)),
@@ -713,7 +725,7 @@ const FUNDING_CHART_HOURS: usize = 72;
 
 fn draw_funding_chart(f: &mut Frame, p: &PairState, area: Rect) {
     let tr = crate::i18n::t();
-    let block = Block::bordered().title(tr.pr_funding_apr_hist);
+    let block = theme::block().title(tr.pr_funding_apr_hist);
     let Some(e) = &p.extra else {
         f.render_widget(Paragraph::new(tr.t_loading).block(block), area);
         return;
@@ -741,12 +753,12 @@ fn draw_funding_chart(f: &mut Frame, p: &PairState, area: Rect) {
     let ds_zero = Dataset::default()
         .marker(symbols::Marker::Dot)
         .graph_type(GraphType::Line)
-        .style(Style::new().fg(Color::DarkGray))
+        .style(Style::new().fg(theme::c().muted))
         .data(&zero);
     let ds = Dataset::default()
         .marker(symbols::Marker::Braille)
         .graph_type(GraphType::Line)
-        .style(Style::new().fg(Color::Yellow))
+        .style(Style::new().fg(theme::c().accent_amber))
         .data(&pts);
     let chart = Chart::new(vec![ds_zero, ds])
         .block(block)
@@ -754,13 +766,13 @@ fn draw_funding_chart(f: &mut Frame, p: &PairState, area: Rect) {
             Axis::default()
                 .bounds([0.0, n])
                 .labels(["-3d".to_string(), tr.pr_now.to_string()])
-                .style(Style::new().fg(Color::DarkGray)),
+                .style(Style::new().fg(theme::c().muted)),
         )
         .y_axis(
             Axis::default()
                 .bounds([-m, m])
                 .labels([format!("{:-.0}%", -m), "0".to_string(), format!("{m:+.0}%")])
-                .style(Style::new().fg(Color::DarkGray)),
+                .style(Style::new().fg(theme::c().muted)),
         );
     f.render_widget(chart, area);
 }
@@ -775,7 +787,7 @@ fn draw_spark(f: &mut Frame, title: &str, values: &[f64], color: Color, area: Re
     if vals.len() < 2 {
         f.render_widget(
             Paragraph::new(crate::i18n::t().pr_accumulating)
-                .block(Block::bordered().title(format!(" {title} "))),
+                .block(theme::block().title(format!(" {title} "))),
             area,
         );
         return;
@@ -790,7 +802,7 @@ fn draw_spark(f: &mut Frame, title: &str, values: &[f64], color: Color, area: Re
         .iter()
         .map(|v| (((v - mn) / span) * 100.0).round() as u64)
         .collect();
-    let block = Block::bordered().title(format!(" {title} [{} … {}] ", fmt_px(mn), fmt_px(mx)));
+    let block = theme::block().title(format!(" {title} [{} … {}] ", fmt_px(mn), fmt_px(mx)));
     f.render_widget(
         Sparkline::default()
             .block(block)

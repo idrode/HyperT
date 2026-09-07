@@ -765,9 +765,11 @@ fn agent_expiry_span(b: &mut LineB, t: &crate::app::TradeArm) {
     if !life.shows_countdown() {
         // aún lejos: solo la fecha, sin urgencia que entrene a ignorarla
         b.push(
-            tr.ex_agent_expiry
-                .replacen("{}", &date, 1)
-                .replacen("{}", &days_left(left).to_string(), 1),
+            tr.ex_agent_expiry.replacen("{}", &date, 1).replacen(
+                "{}",
+                &days_left(left).to_string(),
+                1,
+            ),
             dim(),
         );
         return;

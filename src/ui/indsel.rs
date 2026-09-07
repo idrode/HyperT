@@ -63,10 +63,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 // stack core de la Vista 3: visible pero no conmutable
                 lines.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(
-                        format!("[x] {label}"),
-                        Style::new().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!("[x] {label}"), Style::new().fg(Color::DarkGray)),
                 ]));
             }
         }

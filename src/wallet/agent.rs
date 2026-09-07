@@ -190,11 +190,12 @@ pub struct LoadedAgent {
 /// Expiración a partir del JSON de la clave: `valid_until_ms` explícito, o
 /// el default del protocolo (aprobación + 90d) para archivos antiguos.
 fn expiry_from_json(v: &serde_json::Value) -> Option<u64> {
-    v["valid_until_ms"]
-        .as_u64()
-        .or_else(|| v["approved_nonce_ms"].as_u64().map(|n| n + DEFAULT_AGENT_TTL_MS))
+    v["valid_until_ms"].as_u64().or_else(|| {
+        v["approved_nonce_ms"]
+            .as_u64()
+            .map(|n| n + DEFAULT_AGENT_TTL_MS)
+    })
 }
-
 
 /// Carga la clave del agent de esta red, verificando que el archivo es de la
 /// red pedida (autorizar en testnet no debe firmar jamás contra mainnet).
@@ -455,7 +456,14 @@ mod tests {
         std::env::set_var("HYPERT_SECRETS_DIR", &tmp);
 
         let out = (|| -> Result<()> {
-            save_pending("Testnet", "0xMASTER", "0xAGENT", "0xkey", 123, 123 + MAX_AGENT_TTL_MS)?;
+            save_pending(
+                "Testnet",
+                "0xMASTER",
+                "0xAGENT",
+                "0xkey",
+                123,
+                123 + MAX_AGENT_TTL_MS,
+            )?;
             // aún no promovida: no cuenta como agent existente
             assert_eq!(existing_agent("Testnet"), None);
             let path = promote("Testnet")?;

@@ -1374,7 +1374,10 @@ pub struct App {
     /// Red + canal de datos, para poder RE-ARMAR el trading en caliente
     /// cuando se activa un relevo de agent (la clave nueva se carga de disco
     /// y se levanta un trader nuevo sin reiniciar la app). None en tests.
-    trading_ctx: Option<(hyperliquid_rust_sdk::BaseUrl, mpsc::UnboundedSender<DataMsg>)>,
+    trading_ctx: Option<(
+        hyperliquid_rust_sdk::BaseUrl,
+        mpsc::UnboundedSender<DataMsg>,
+    )>,
 }
 
 /// Contexto del trading real: la cuenta cuyas posiciones/órdenes se muestran
@@ -4186,6 +4189,10 @@ impl App {
                 crate::i18n::toggle_lang();
                 return;
             }
+            KeyCode::Char('T') => {
+                crate::ui::theme::toggle_theme();
+                return;
+            }
             KeyCode::Char('q') => {
                 self.should_quit = true;
                 return;
@@ -5627,7 +5634,10 @@ mod tests {
         app.exec_submit();
         assert!(app.exec.confirm.is_none(), "no debe abrir confirmación");
         let err = app.exec.err.clone().unwrap();
-        assert!(err.contains("BLOQUEADAS") || err.contains("BLOCKED"), "{err}");
+        assert!(
+            err.contains("BLOQUEADAS") || err.contains("BLOCKED"),
+            "{err}"
+        );
         assert!(trader_rx.try_recv().is_err(), "no debe salir ninguna orden");
 
         // cancelar una orden: sigue funcionando
@@ -5757,7 +5767,10 @@ mod tests {
         );
         // pero su fecha sigue mandando igual que en cualquier otro agent
         app.trade.as_mut().unwrap().agent_expires_ms = Some(in_days(1.0));
-        assert!(matches!(app.entry_block(), Some(EntryBlock::Expiring { .. })));
+        assert!(matches!(
+            app.entry_block(),
+            Some(EntryBlock::Expiring { .. })
+        ));
     }
 
     /// El relevo no se puede probar de punta a punta sin firma real, pero sí
@@ -5780,7 +5793,10 @@ mod tests {
         );
         // el canal del trader viejo queda cerrado: su bucle recv() termina
         assert!(
-            matches!(viejo.try_recv(), Err(mpsc::error::TryRecvError::Disconnected)),
+            matches!(
+                viejo.try_recv(),
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ),
             "el trader anterior debe quedarse sin canal"
         );
         // y el contador se resetea con la clave nueva: entradas desbloqueadas
@@ -5790,7 +5806,10 @@ mod tests {
             },
         ));
         assert_eq!(app.entry_block(), None);
-        assert_eq!(app.trade.as_ref().unwrap().agent_addr, "0xAGENTNUEVOnuevoAGENT");
+        assert_eq!(
+            app.trade.as_ref().unwrap().agent_addr,
+            "0xAGENTNUEVOnuevoAGENT"
+        );
 
         // el panel enruta ya por el canal NUEVO
         pair_btc(&mut app);

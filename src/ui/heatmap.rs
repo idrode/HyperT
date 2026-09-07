@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, HeatMetric, PairState, OI_WIN_LONG};
 
 use super::fmt::fmt_usd;
+use super::theme;
 
 const CELL_W: u16 = 14;
 const CELL_H: u16 = 3;
@@ -15,7 +16,7 @@ const MAX_PAIRS: usize = 30;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let s = crate::i18n::t();
-    let block = Block::bordered().title(format!(
+    let block = theme::block().title(format!(
         " Heatmap top-{MAX_PAIRS}{}{}{}",
         s.hm_by_oi_metric,
         app.heat_metric.label(),
@@ -54,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         }
 
         let (t, text) = metric_of(app.heat_metric, p);
-        let bg = heat_color(t);
+        let bg = theme::heat_bg(t);
         let lines = vec![
             Line::from(Span::styled(
                 p.meta.name.clone(),
@@ -63,12 +64,12 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             Line::from(text),
             Line::from(Span::styled(
                 fmt_usd(p.oi_notional()),
-                Style::new().fg(Color::Rgb(200, 200, 200)),
+                Style::new().fg(theme::c().neutral),
             )),
         ];
         f.render_widget(
             Paragraph::new(lines)
-                .style(Style::new().bg(bg).fg(Color::White))
+                .style(Style::new().bg(bg).fg(theme::heat_fg()))
                 .alignment(Alignment::Center),
             rect,
         );
@@ -91,14 +92,5 @@ fn metric_of(metric: HeatMetric, p: &PairState) -> (f64, String) {
             let c = p.chg24_pct().unwrap_or(0.0);
             (c / 10.0, format!("{c:+.2}% 24h"))
         }
-    }
-}
-
-fn heat_color(t: f64) -> Color {
-    let t = t.clamp(-1.0, 1.0);
-    if t >= 0.0 {
-        Color::Rgb(20, 45 + (110.0 * t) as u8, 30)
-    } else {
-        Color::Rgb(45 + (140.0 * (-t)) as u8, 25, 30)
     }
 }

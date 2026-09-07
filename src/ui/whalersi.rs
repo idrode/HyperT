@@ -4,7 +4,7 @@
 //! tendencia, no continuación. ESTIMACIÓN técnica, sin OI ni datos on-chain.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{App, PairExtraData, PairState};
 use crate::signals::{WhaleParams, WhaleSide};
@@ -13,6 +13,7 @@ use super::fmt::{age_label, fmt_px, time_label};
 use super::oscimg::{self, LineColor, OscLine, OscSpec};
 use super::pair;
 use super::taplot;
+use super::theme;
 
 const TITLE: &str = " Ballenas + RSI/ADX/DMI ";
 /// Ancho reservado al eje 0-100 a la derecha del panel.
@@ -20,10 +21,7 @@ const AXIS_W: u16 = 5;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let placeholder = |f: &mut Frame, msg: &'static str| {
-        f.render_widget(
-            Paragraph::new(msg).block(Block::bordered().title(TITLE)),
-            area,
-        );
+        f.render_widget(Paragraph::new(msg).block(theme::block().title(TITLE)), area);
     };
     let ind3 = app.ind3;
     // el caché de imagen (gfx) y el par se prestan por campos disjuntos de App
@@ -61,11 +59,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 /// Compartido con el sub-panel de indicadores de la Vista 2.
 pub(super) fn rsi_zone_color(v: f64, wp: &WhaleParams) -> Color {
     if v >= wp.overbought {
-        Color::Red
+        theme::c().negative
     } else if v <= wp.oversold {
-        Color::Green
+        theme::c().positive
     } else {
-        Color::Magenta
+        theme::c().accent_magenta
     }
 }
 
@@ -75,7 +73,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     let i = e.candles.len() - 1;
     let last = &e.candles[i];
 
-    let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: String| Span::styled(s, Style::new().fg(theme::c().muted));
     let colored = |s: String, c: Color| Span::styled(s, Style::new().fg(c));
     let num = |v: f64| {
         if v.is_finite() {
@@ -94,8 +92,8 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
 
     let last_trig = panel.triggers.last().map(|t| {
         let (arrow, c) = match t.side {
-            WhaleSide::Buy => ("▲ compra", Color::Green),
-            WhaleSide::Sell => ("▼ venta", Color::Red),
+            WhaleSide::Buy => ("▲ compra", theme::c().positive),
+            WhaleSide::Sell => ("▼ venta", theme::c().negative),
         };
         (
             format!("{arrow} int {:.1} ", t.height),
@@ -106,7 +104,9 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     let mut l1 = vec![
         Span::styled(
             format!("{} ", p.meta.name),
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().accent_cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(fmt_px(p.mid), Style::new().add_modifier(Modifier::BOLD)),
         dim(format!(
@@ -135,19 +135,19 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
             if rsi.is_finite() {
                 rsi_zone_color(rsi, &wp)
             } else {
-                Color::DarkGray
+                theme::c().muted
             },
         ),
         dim("  MA ".to_string()),
-        colored(num(panel.rsi_ma[i]), Color::Yellow),
+        colored(num(panel.rsi_ma[i]), theme::c().accent_amber),
         dim("  %B ".to_string()),
-        colored(num(panel.mod_rsi[i]), Color::Blue),
+        colored(num(panel.mod_rsi[i]), theme::c().accent_blue),
         dim("  ADX ".to_string()),
         Span::raw(num(d.adx)),
         dim("  +DI ".to_string()),
-        colored(num(d.plus_di), Color::Green),
+        colored(num(d.plus_di), theme::c().positive),
         dim("  −DI ".to_string()),
-        colored(num(d.minus_di), Color::Red),
+        colored(num(d.minus_di), theme::c().negative),
         dim(format!(
             "   BB precio [{} … {}]",
             px_or_dash(panel.bb_lower[i]),
@@ -158,9 +158,9 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     // checklist en vivo de los 5 filtros de cada lado sobre la última vela
     let cond = |label: String, ok: Option<bool>| -> Span<'static> {
         match ok {
-            Some(true) => Span::styled(format!("{label}✓ "), Style::new().fg(Color::Green)),
-            Some(false) => Span::styled(format!("{label}✗ "), Style::new().fg(Color::DarkGray)),
-            None => Span::styled(format!("{label}? "), Style::new().fg(Color::DarkGray)),
+            Some(true) => Span::styled(format!("{label}✓ "), Style::new().fg(theme::c().positive)),
+            Some(false) => Span::styled(format!("{label}✗ "), Style::new().fg(theme::c().muted)),
+            None => Span::styled(format!("{label}? "), Style::new().fg(theme::c().muted)),
         }
     };
     let fin = |v: f64, pred: bool| if v.is_finite() { Some(pred) } else { None };
@@ -168,7 +168,9 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     let l3 = Line::from(vec![
         Span::styled(
             "▲ long  ",
-            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().positive)
+                .add_modifier(Modifier::BOLD),
         ),
         cond("low≤BB".into(), fin(bb_lo, last.low <= bb_lo)),
         cond(
@@ -191,7 +193,9 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     let l4 = Line::from(vec![
         Span::styled(
             "▼ short ",
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().negative)
+                .add_modifier(Modifier::BOLD),
         ),
         cond("high≥BB".into(), fin(bb_up, last.high >= bb_up)),
         cond(
@@ -213,7 +217,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     ]);
 
     f.render_widget(
-        Paragraph::new(vec![Line::from(l1), l2, l3, l4]).block(Block::bordered().title(format!(
+        Paragraph::new(vec![Line::from(l1), l2, l3, l4]).block(theme::block().title(format!(
             " {} — whales+RSI (estimado, TA puro) ",
             p.meta.name
         ))),
@@ -251,7 +255,7 @@ fn draw_chart(
         parts.push("TRIX");
     }
     parts.push("▲▼ ballena");
-    let mut block = Block::bordered().title(format!(
+    let mut block = theme::block().title(format!(
         " whales+RSI {} ×{} — {} — i cambia TF · o indicadores ",
         e.interval.label(),
         n - start,
@@ -317,17 +321,17 @@ fn draw_chart(
         lines.push(OscLine {
             vals: &adx,
             width: 1,
-            color: LineColor::Fixed(oscimg::GRAY),
+            color: LineColor::Fixed(oscimg::gray()),
         });
         lines.push(OscLine {
             vals: &pdi,
             width: 1,
-            color: LineColor::Fixed(oscimg::GREEN),
+            color: LineColor::Fixed(oscimg::green()),
         });
         lines.push(OscLine {
             vals: &mdi,
             width: 1,
-            color: LineColor::Fixed(oscimg::RED),
+            color: LineColor::Fixed(oscimg::red()),
         });
     }
     if ind3.rsi_ma {
@@ -335,12 +339,12 @@ fn draw_chart(
             lines.push(OscLine {
                 vals: up,
                 width: 1,
-                color: LineColor::Fixed(oscimg::DIM_GREEN),
+                color: LineColor::Fixed(oscimg::dim_green()),
             });
             lines.push(OscLine {
                 vals: lo,
                 width: 1,
-                color: LineColor::Fixed(oscimg::DIM_GREEN),
+                color: LineColor::Fixed(oscimg::dim_green()),
             });
         }
     }
@@ -353,7 +357,7 @@ fn draw_chart(
         lines.push(OscLine {
             vals: ts,
             width: 1,
-            color: LineColor::Fixed(oscimg::CYAN),
+            color: LineColor::Fixed(oscimg::cyan()),
         });
     }
     let zone = |v: f64| oscimg::rsi_zone_rgb(v, &wp);
@@ -361,14 +365,14 @@ fn draw_chart(
         lines.push(OscLine {
             vals: &panel.mod_rsi,
             width: 1,
-            color: LineColor::Fixed(oscimg::BLUE),
+            color: LineColor::Fixed(oscimg::blue()),
         });
     }
     if ind3.rsi_ma {
         lines.push(OscLine {
             vals: &panel.rsi_ma,
             width: 1,
-            color: LineColor::Fixed(oscimg::YELLOW),
+            color: LineColor::Fixed(oscimg::yellow()),
         });
         lines.push(OscLine {
             vals: &panel.rsi,
@@ -381,8 +385,8 @@ fn draw_chart(
         .iter()
         .map(|t| {
             let col = match t.side {
-                WhaleSide::Buy => oscimg::BAR_BUY,
-                WhaleSide::Sell => oscimg::BAR_SELL,
+                WhaleSide::Buy => oscimg::bar_buy(),
+                WhaleSide::Sell => oscimg::bar_sell(),
             };
             (t.idx, t.height, col)
         })
@@ -422,11 +426,11 @@ fn draw_chart(
     };
     let mut labels: Vec<Line> = vec![Line::raw(""); h];
     for (v, c) in [
-        (100.0, Color::DarkGray),
-        (wp.overbought, Color::Rgb(150, 70, 75)),
-        (50.0, Color::DarkGray),
-        (wp.oversold, Color::Rgb(60, 130, 80)),
-        (0.0, Color::DarkGray),
+        (100.0, theme::c().muted),
+        (wp.overbought, theme::c().negative_dim),
+        (50.0, theme::c().muted),
+        (wp.oversold, theme::c().positive_dim),
+        (0.0, theme::c().muted),
     ] {
         labels[row_of(v)] = Line::from(Span::styled(format!("{v:.0}"), Style::new().fg(c)));
     }
@@ -539,10 +543,7 @@ mod tests {
         let mut app = app_vista3();
         let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
         let s0 = frame(&mut term, &mut app);
-        assert!(
-            !s0.contains("· TRIX ·"),
-            "TRIX apagado por defecto:\n{s0}"
-        );
+        assert!(!s0.contains("· TRIX ·"), "TRIX apagado por defecto:\n{s0}");
         let n0 = super::oscimg::RASTER_COUNT.load(Ordering::SeqCst);
         // frame idéntico: el caché debe aguantar (0 rasters nuevos)
         frame(&mut term, &mut app);
@@ -632,18 +633,78 @@ mod tests {
             "los triggers no dependen de la selección"
         );
         // el título del panel mantiene ▲▼ (nunca es ocultable)
-        assert!(s.contains("▲▼ ballena"), "marcas siempre en el título:\n{s}");
+        assert!(
+            s.contains("▲▼ ballena"),
+            "marcas siempre en el título:\n{s}"
+        );
+    }
+
+    /// El toggle de tema (tecla `T`) recolorea TAMBIÉN los paneles de imagen
+    /// de las Vistas 2 y 3, no solo el texto: cambiar de tema invalida el
+    /// caché del raster (re-rasteriza) y el marco cambia de color. Y el
+    /// checklist/las marcas ▲▼ siguen intactos: esto es solo color.
+    #[test]
+    fn el_toggle_de_tema_recolorea_texto_e_imagen() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        use std::sync::atomic::Ordering;
+
+        let _g = super::theme::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::theme::set_theme(super::theme::Theme::Dark);
+
+        let mut app = app_vista3();
+        let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        let borde = |term: &Terminal<TestBackend>| {
+            // esquina superior izquierda del panel: color del marco
+            term.backend().buffer().cell((0, 1)).unwrap().fg
+        };
+        let triggers = |app: &App| {
+            app.pairs["BTC"]
+                .extra
+                .as_ref()
+                .unwrap()
+                .panel
+                .triggers
+                .len()
+        };
+
+        for view in [crate::app::View::Pair, crate::app::View::WhaleRsi] {
+            app.view = view;
+            frame(&mut term, &mut app);
+            frame(&mut term, &mut app); // caché caliente
+            let n0 = super::oscimg::RASTER_COUNT.load(Ordering::SeqCst);
+            let borde_oscuro = borde(&term);
+            let trig0 = triggers(&app);
+
+            app.handle_key(KeyEvent::from(KeyCode::Char('T')));
+            assert_eq!(super::theme::theme(), super::theme::Theme::Light);
+            frame(&mut term, &mut app);
+
+            assert!(
+                super::oscimg::RASTER_COUNT.load(Ordering::SeqCst) > n0,
+                "el cambio de tema debe re-rasterizar el panel de {view:?}"
+            );
+            assert_eq!(borde_oscuro, super::theme::DARK.border);
+            assert_eq!(borde(&term), super::theme::LIGHT.border);
+            assert_eq!(trig0, triggers(&app), "el color no toca la detección");
+
+            app.handle_key(KeyEvent::from(KeyCode::Char('T')));
+            frame(&mut term, &mut app);
+            assert_eq!(borde(&term), super::theme::DARK.border);
+        }
+        super::theme::set_theme(super::theme::Theme::Dark);
     }
 }
 
 fn draw_log(f: &mut Frame, e: &PairExtraData, area: Rect) {
     let trig = &e.panel.triggers;
-    let block = Block::bordered().title(format!(
+    let block = theme::block().title(format!(
         " Disparos ballena — {} en {} velas ",
         trig.len(),
         e.candles.len()
     ));
-    let dim = |s: &'static str| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: &'static str| Span::styled(s, Style::new().fg(theme::c().muted));
     let mut lines: Vec<Line> = Vec::new();
     if trig.is_empty() {
         lines.push(Line::from(dim("sin disparos en las velas cargadas")));
@@ -657,8 +718,8 @@ fn draw_log(f: &mut Frame, e: &PairExtraData, area: Rect) {
         for t in trig.iter().rev().take(max_rows.max(1)) {
             let c = &e.candles[t.idx];
             let (arrow, side_txt, color) = match t.side {
-                WhaleSide::Buy => ("▲", "compra", Color::Green),
-                WhaleSide::Sell => ("▼", "venta ", Color::Red),
+                WhaleSide::Buy => ("▲", "compra", theme::c().positive),
+                WhaleSide::Sell => ("▼", "venta ", theme::c().negative),
             };
             lines.push(Line::from(vec![
                 Span::styled(
@@ -668,7 +729,7 @@ fn draw_log(f: &mut Frame, e: &PairExtraData, area: Rect) {
                 Span::raw(format!("{:>4.1} ", t.height)),
                 Span::styled(format!("{:>6.2}% ", t.dist_pct), Style::new().fg(color)),
                 Span::raw(format!("{:<10} ", fmt_px(c.close))),
-                Span::styled(age_label(c.t_close), Style::new().fg(Color::DarkGray)),
+                Span::styled(age_label(c.t_close), Style::new().fg(theme::c().muted)),
             ]));
         }
     }
