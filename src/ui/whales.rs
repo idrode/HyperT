@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table};
 
 use crate::app::App;
 use crate::data::types::PosInfo;
 
-use super::fmt::{fmt_px, fmt_usd, sign_color};
+use super::fmt::{fmt_px, fmt_usd};
+use super::theme;
 
 fn short_addr(a: &str) -> String {
     if a.len() > 12 {
@@ -74,27 +75,29 @@ pub(super) fn draw_addr_overlay(
     f.render_widget(Clear, r);
 
     let s = crate::i18n::t();
-    let dim = Style::new().fg(Color::DarkGray);
+    let dim = Style::new().fg(theme::c().muted);
     let mut lines = vec![
         Line::from(Span::styled(s.wh_modal_full_addr, dim)),
         Line::from(Span::styled(
             addr.to_string(),
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().accent_cyan)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
     match feedback {
         Some(msg) => lines.push(Line::from(Span::styled(
             msg.clone(),
-            Style::new().fg(Color::Green),
+            Style::new().fg(theme::c().positive),
         ))),
         None => lines.push(Line::from(Span::styled(hint.to_string(), dim))),
     }
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::bordered()
+            theme::block()
                 .title(title.to_string())
-                .border_style(Style::new().fg(Color::Cyan)),
+                .border_style(Style::new().fg(theme::c().accent_cyan)),
         ),
         r,
     );
@@ -128,7 +131,7 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
             .partial_cmp(&(a.1 .0 + a.1 .1))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: String| Span::styled(s, Style::new().fg(theme::c().muted));
     let tr = crate::i18n::t();
 
     let mut concentr: Vec<Span> = vec![dim(tr.wh_by_pair.to_string())];
@@ -141,7 +144,7 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         ));
         concentr.push(Span::styled(
             format!("L{lpct:.0}%"),
-            Style::new().fg(Color::Green),
+            Style::new().fg(theme::c().positive),
         ));
         concentr.push(dim(format!("/{} · ", fmt_usd(t))));
     }
@@ -161,13 +164,15 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = vec![
         Line::from(vec![
             dim(format!("Σ {} ", tr.wh_long)),
-            Span::styled(fmt_usd(long_ntl), Style::new().fg(Color::Green)),
+            Span::styled(fmt_usd(long_ntl), Style::new().fg(theme::c().positive)),
             dim(format!("   Σ {} ", tr.wh_short)),
-            Span::styled(fmt_usd(short_ntl), Style::new().fg(Color::Red)),
+            Span::styled(fmt_usd(short_ntl), Style::new().fg(theme::c().negative)),
             dim(format!("   {} ", tr.wh_bias)),
             Span::styled(
                 format!("{bias:+.1}% "),
-                Style::new().fg(sign_color(Some(bias), false)),
+                // sesgo agregado: mismo gradiente de intensidad que el skew
+                // de la Vista 6 (±100% = acento puro)
+                Style::new().fg(theme::bias_fg(bias / 100.0)),
             ),
             dim(format!("· {status}")),
         ]),
@@ -184,20 +189,20 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         if !scan.complete() {
             spans.push(Span::styled(
                 format!(" · {}", tr.wh_scan_partial),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ));
         }
         if scan.failed > 0 {
             spans.push(Span::styled(
                 format!(" · {} {}", scan.failed, tr.wh_scan_failed),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ));
         }
         spans.push(dim(format!(" · {}", tr.wh_absent_note)));
         lines.push(Line::from(spans));
     }
     f.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(tr.wh_title)),
+        Paragraph::new(lines).block(theme::block().title(tr.wh_title)),
         area,
     );
 }
@@ -226,7 +231,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let tr = crate::i18n::t();
-    let header_style = Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD);
+    let header_style = Style::new()
+        .fg(theme::c().neutral)
+        .add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
         tr.wh_col_account,
         tr.wh_col_value,
@@ -251,22 +258,26 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(addr, acct, p, agg, first_of_whale)| {
             let long = p.szi >= 0.0;
             let side = if long { "LONG" } else { "SHORT" };
-            let side_color = if long { Color::Green } else { Color::Red };
+            let side_color = if long {
+                theme::c().positive
+            } else {
+                theme::c().negative
+            };
             let lev = format!("{}×{}", p.leverage, if p.is_cross { "c" } else { "i" });
             let mut cells = vec![
-                Cell::from(short_addr(addr)).style(Style::new().fg(Color::Cyan)),
+                Cell::from(short_addr(addr)).style(Style::new().fg(theme::c().accent_cyan)),
                 Cell::from(fmt_usd(*acct)),
                 Cell::from(p.coin.clone()).style(Style::new().add_modifier(Modifier::BOLD)),
                 Cell::from(side).style(Style::new().fg(side_color).add_modifier(Modifier::BOLD)),
                 Cell::from(fmt_usd(p.position_value)),
                 Cell::from(p.entry_px.map(fmt_px).unwrap_or_else(|| "—".into())),
                 Cell::from(p.liq_px.map(fmt_px).unwrap_or_else(|| "—".into()))
-                    .style(Style::new().fg(Color::Yellow)),
+                    .style(Style::new().fg(theme::c().accent_amber)),
                 Cell::from(lev),
                 Cell::from(fmt_usd(p.unrealized_pnl))
-                    .style(Style::new().fg(sign_color(Some(p.unrealized_pnl), false))),
+                    .style(Style::new().fg(theme::sign_color(Some(p.unrealized_pnl), false))),
                 Cell::from(format!("{:+.1}", p.roe * 100.0))
-                    .style(Style::new().fg(sign_color(Some(p.roe), false))),
+                    .style(Style::new().fg(theme::sign_color(Some(p.roe), false))),
             ];
             if pnl_mode {
                 // "—" = sin dato (no debería darse en una whale listada);
@@ -276,11 +287,10 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 // primera fila del grupo puede quedar fuera de pantalla y el
                 // dato desaparecería justo cuando se está mirando.
                 let cell = match agg {
-                    Some(v) if *first_of_whale => {
-                        Cell::from(fmt_usd(*v)).style(Style::new().fg(sign_color(Some(*v), false)))
-                    }
-                    Some(v) => Cell::from(fmt_usd(*v)).style(Style::new().fg(Color::DarkGray)),
-                    None => Cell::from("—").style(Style::new().fg(Color::DarkGray)),
+                    Some(v) if *first_of_whale => Cell::from(fmt_usd(*v))
+                        .style(Style::new().fg(theme::sign_color(Some(*v), false))),
+                    Some(v) => Cell::from(fmt_usd(*v)).style(Style::new().fg(theme::c().muted)),
+                    None => Cell::from("—").style(Style::new().fg(theme::c().muted)),
                 };
                 cells.push(cell);
             }
@@ -312,10 +322,10 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     );
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title(title))
+        .block(theme::block().title(title))
         .row_highlight_style(
             Style::new()
-                .bg(Color::Rgb(40, 44, 66))
+                .bg(theme::c().selection_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶");

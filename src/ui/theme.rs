@@ -391,6 +391,18 @@ pub fn liq_bar(long: bool, frac: f64) -> Color {
     mix(p.bg, accent, 0.40 + 0.60 * frac.clamp(0.0, 1.0))
 }
 
+/// Color de TEXTO por sesgo direccional con intensidad (Vistas 6 y 7): `t` ∈
+/// [-1, 1], positivo = alcista (verde de marca), negativo = bajista (coral),
+/// y |t| = cuánto de marcado está el sesgo. A diferencia de [`heat_bg`] mezcla
+/// desde el gris neutro, no desde el fondo: un sesgo débil debe leerse como
+/// "casi neutro", no como texto medio borrado.
+pub fn bias_fg(t: f64) -> Color {
+    let t = t.clamp(-1.0, 1.0);
+    let p = c();
+    let accent = if t >= 0.0 { p.positive } else { p.negative };
+    mix(p.neutral, accent, 0.35 + 0.65 * t.abs())
+}
+
 // ── forma del borde ───────────────────────────────────────────────────────
 
 /// Aspecto del marco. El usuario busca algo "cuadrado, de terminal vieja";
@@ -735,6 +747,36 @@ mod tests {
         let d = heat_bg(0.6);
         set_theme(Theme::Light);
         assert_ne!(d, heat_bg(0.6));
+        set_theme(Theme::Dark);
+    }
+
+    /// El gradiente de sesgo (score compuesto, skew de whales) es continuo,
+    /// arranca en el gris neutro y no cruza las familias.
+    #[test]
+    fn el_gradiente_de_sesgo_es_continuo_y_no_cruza_familias() {
+        let _g = EXCLUSIVA.lock().unwrap_or_else(|e| e.into_inner());
+        for th in [Theme::Dark, Theme::Light] {
+            set_theme(th);
+            let p = c();
+            let bal = |col: Color| {
+                let x = parts(col);
+                x[1] - x[0]
+            };
+            assert_eq!(bias_fg(1.0), p.positive, "sesgo alcista pleno");
+            assert_eq!(bias_fg(-1.0), p.negative, "sesgo bajista pleno");
+            // más margen = más lejos del neutro, sin saltos de familia
+            let dist = |a: Color, b: Color| {
+                let (x, y) = (parts(a), parts(b));
+                (0..3).map(|i| (x[i] - y[i]).abs()).sum::<f64>()
+            };
+            let mut prev = dist(bias_fg(0.1), p.neutral);
+            for k in 2..=10 {
+                let cur = dist(bias_fg(k as f64 / 10.0), p.neutral);
+                assert!(cur > prev, "el sesgo debe saturarse al crecer");
+                prev = cur;
+            }
+            assert!(bal(bias_fg(0.5)) > bal(bias_fg(-0.5)), "familias separadas");
+        }
         set_theme(Theme::Dark);
     }
 

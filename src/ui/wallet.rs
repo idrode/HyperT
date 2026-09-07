@@ -1,12 +1,13 @@
 use std::time::Instant;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, TableState};
 
 use crate::app::{App, WalletFocus, FRESH_POS_MS};
 use crate::data::types::{AccountSnapshot, FillInfo, OpenEst, OpenKind, PosInfo, TransferInfo};
 
-use super::fmt::{datetime_label, fmt_px, fmt_usd, sign_color, time_label};
+use super::fmt::{datetime_label, fmt_px, fmt_usd, time_label};
+use super::theme;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let tr = crate::i18n::t();
@@ -24,7 +25,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 Line::raw(tr.wa_read_only),
                 Line::raw(tr.wa_no_keys),
             ])
-            .block(Block::bordered().title(tr.wa_title)),
+            .block(theme::block().title(tr.wa_title)),
             area,
         );
         return;
@@ -155,7 +156,7 @@ fn draw_related(f: &mut Frame, app: &mut App, area: Rect) {
         app.wallet_in_sel,
         app.wallet_focus == WalletFocus::In,
         loading,
-        Color::Green,
+        theme::c().positive,
     );
     let (out_area, out_top) = draw_transfer_list(
         f,
@@ -165,7 +166,7 @@ fn draw_related(f: &mut Frame, app: &mut App, area: Rect) {
         app.wallet_out_sel,
         app.wallet_focus == WalletFocus::Out,
         loading,
-        Color::Red,
+        theme::c().negative,
     );
     app.wallet_in_area = in_area;
     app.wallet_in_top = in_top;
@@ -194,7 +195,11 @@ fn draw_transfer_list(
         tr.wa_col_size,
         tr.wa_rel_col_kind,
     ])
-    .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(
+        Style::new()
+            .fg(theme::c().neutral)
+            .add_modifier(Modifier::BOLD),
+    );
 
     // ventana visible: mantiene la fila seleccionada a la vista sin TableState
     // (el mapeo de clicks necesita saber el desplazamiento exacto).
@@ -221,14 +226,15 @@ fn draw_transfer_list(
             };
             let row = Row::new(vec![
                 Cell::from(time_label(t.time_ms)),
-                Cell::from(short_addr(&t.counterparty)).style(Style::new().fg(Color::Cyan)),
+                Cell::from(short_addr(&t.counterparty))
+                    .style(Style::new().fg(theme::c().accent_cyan)),
                 Cell::from(amount).style(Style::new().fg(accent)),
-                Cell::from(t.kind.clone()).style(Style::new().fg(Color::DarkGray)),
+                Cell::from(t.kind.clone()).style(Style::new().fg(theme::c().muted)),
             ]);
             if focused && i == sel {
                 row.style(
                     Style::new()
-                        .bg(Color::Rgb(40, 44, 66))
+                        .bg(theme::c().selection_bg)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
@@ -244,7 +250,11 @@ fn draw_transfer_list(
     } else {
         format!(" {label} ({}) ", items.len())
     };
-    let border = if focused { Color::Cyan } else { Color::Reset };
+    let border = if focused {
+        theme::c().accent_cyan
+    } else {
+        theme::c().border
+    };
     let widths = [
         Constraint::Length(14),
         Constraint::Length(15),
@@ -253,7 +263,7 @@ fn draw_transfer_list(
     ];
     f.render_widget(
         Table::new(rows, widths).header(header).block(
-            Block::bordered()
+            theme::block()
                 .title(title)
                 .border_style(Style::new().fg(border)),
         ),
@@ -292,7 +302,7 @@ fn short_addr(a: &str) -> String {
 /// ganadora/perdedora) y PnL realizado acumulado, derivados de `userFills`.
 fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
     let tr = crate::i18n::t();
-    let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: String| Span::styled(s, Style::new().fg(theme::c().muted));
     let s = summarize_fills(&app.wallet_fills);
     let lines = if app.wallet_fills_at.is_none() {
         vec![
@@ -308,11 +318,11 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         let (wr_span, label) = match s.win_rate() {
             Some(wr) => {
                 let (txt, col) = if wr > 50.0 {
-                    (tr.wa_ganadora, Color::Green)
+                    (tr.wa_ganadora, theme::c().positive)
                 } else if wr < 50.0 {
-                    (tr.wa_perdedora, Color::Red)
+                    (tr.wa_perdedora, theme::c().negative)
                 } else {
-                    (tr.wa_neutra, Color::Gray)
+                    (tr.wa_neutra, theme::c().neutral)
                 };
                 (
                     Span::styled(
@@ -342,7 +352,7 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     fmt_signed_usd(s.realized_pnl),
                     Style::new()
-                        .fg(sign_color(Some(s.realized_pnl), false))
+                        .fg(theme::sign_color(Some(s.realized_pnl), false))
                         .add_modifier(Modifier::BOLD),
                 ),
                 dim(format!(
@@ -355,7 +365,7 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         ]
     };
     f.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(tr.wa_hist_perf_title)),
+        Paragraph::new(lines).block(theme::block().title(tr.wa_hist_perf_title)),
         area,
     );
 }
@@ -375,7 +385,11 @@ fn draw_closed(f: &mut Frame, app: &App, area: Rect) {
         tr.wa_col_pnl,
         "ret%·ntl",
     ])
-    .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(
+        Style::new()
+            .fg(theme::c().neutral)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let closed: Vec<&FillInfo> = app
         .wallet_fills
@@ -399,12 +413,12 @@ fn draw_closed(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(f.dir.clone()),
                 Cell::from(format!("{:.4}", f.sz)),
                 Cell::from(fmt_signed_usd(f.closed_pnl))
-                    .style(Style::new().fg(sign_color(Some(f.closed_pnl), false))),
+                    .style(Style::new().fg(theme::sign_color(Some(f.closed_pnl), false))),
                 Cell::from(match ret {
                     Some(r) => format!("{r:+.2}"),
                     None => "—".into(),
                 })
-                .style(Style::new().fg(sign_color(ret, false))),
+                .style(Style::new().fg(theme::sign_color(ret, false))),
             ])
         })
         .collect();
@@ -431,7 +445,7 @@ fn draw_closed(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Table::new(rows, widths)
             .header(header)
-            .block(Block::bordered().title(title)),
+            .block(theme::block().title(title)),
         area,
     );
 }
@@ -451,12 +465,12 @@ fn draw_pos_modal(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let tr = crate::i18n::t();
-    let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: String| Span::styled(s, Style::new().fg(theme::c().muted));
     let side = if p.szi >= 0.0 { "LONG" } else { "SHORT" };
     let side_col = if p.szi >= 0.0 {
-        Color::Green
+        theme::c().positive
     } else {
-        Color::Red
+        theme::c().negative
     };
 
     let est = app
@@ -489,18 +503,23 @@ fn draw_pos_modal(f: &mut Frame, app: &App, area: Rect) {
     // NEGATIVO = lo COBRÓ. Las docs/SDK oficiales no lo documentan.
     let funding = p.since_open_funding;
     let (f_txt, f_col) = if funding > 0.0 {
-        (format!("{} ${funding:.4}", tr.wa_paid), Color::Red)
+        (format!("{} ${funding:.4}", tr.wa_paid), theme::c().negative)
     } else if funding < 0.0 {
-        (format!("{} ${:.4}", tr.wa_received, -funding), Color::Green)
+        (
+            format!("{} ${:.4}", tr.wa_received, -funding),
+            theme::c().positive,
+        )
     } else {
-        ("$0.0000".to_string(), Color::Gray)
+        ("$0.0000".to_string(), theme::c().neutral)
     };
 
     let lines = vec![
         Line::from(vec![
             Span::styled(
                 coin.clone(),
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().accent_cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(side, Style::new().fg(side_col).add_modifier(Modifier::BOLD)),
@@ -530,9 +549,9 @@ fn draw_pos_modal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Clear, r);
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::bordered()
+            theme::block()
                 .title(tr.wa_pos_modal_title)
-                .border_style(Style::new().fg(Color::Cyan)),
+                .border_style(Style::new().fg(theme::c().accent_cyan)),
         ),
         r,
     );
@@ -673,7 +692,7 @@ pub(super) fn draw_account(
 ) -> Option<Rect> {
     let tr = crate::i18n::t();
     let now = now_ms();
-    let dim = |s: String| Span::styled(s, Style::new().fg(Color::DarkGray));
+    let dim = |s: String| Span::styled(s, Style::new().fg(theme::c().muted));
     let header_lines = match v.snap {
         Some(w) => {
             let implied_lev = if w.account_value > 0.0 {
@@ -692,7 +711,9 @@ pub(super) fn draw_account(
             let balances = match v.note {
                 Some(n) => Line::from(Span::styled(
                     n.to_string(),
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::c().accent_amber)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 None => Line::from(vec![
                     dim(tr.wa_acct_value.into()),
@@ -715,7 +736,7 @@ pub(super) fn draw_account(
             };
             vec![
                 Line::from(vec![
-                    Span::styled(v.addr.to_string(), Style::new().fg(Color::Cyan)),
+                    Span::styled(v.addr.to_string(), Style::new().fg(theme::c().accent_cyan)),
                     dim(format!("{}{age}{}", tr.wa_refresh_ago, v.hint)),
                 ]),
                 balances,
@@ -724,13 +745,13 @@ pub(super) fn draw_account(
         None => vec![
             Line::from(Span::styled(
                 v.addr.to_string(),
-                Style::new().fg(Color::Cyan),
+                Style::new().fg(theme::c().accent_cyan),
             )),
             Line::from(dim(tr.wa_querying_chs.into())),
         ],
     };
     f.render_widget(
-        Paragraph::new(header_lines).block(Block::bordered().title(v.title.to_string())),
+        Paragraph::new(header_lines).block(theme::block().title(v.title.to_string())),
         hdr_area,
     );
 
@@ -749,7 +770,11 @@ pub(super) fn draw_account(
         "ROE%",
         tr.wa_col_open,
     ])
-    .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(
+        Style::new()
+            .fg(theme::c().neutral)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let empty: Vec<PosInfo> = Vec::new();
     let positions: &[PosInfo] = v
@@ -761,24 +786,29 @@ pub(super) fn draw_account(
         .map(|(i, p)| {
             let long = p.szi >= 0.0;
             let side = if long { "LONG" } else { "SHORT" };
-            let side_color = if long { Color::Green } else { Color::Red };
+            let side_color = if long {
+                theme::c().positive
+            } else {
+                theme::c().negative
+            };
             let mark = mark_of(&p.coin);
             let (liq_txt, dist_txt, dist_color) = match p.liq_px {
                 Some(liq) if mark > 0.0 => {
                     let d = (liq / mark - 1.0) * 100.0;
                     let c = if d.abs() < 5.0 {
-                        Color::Red
+                        theme::c().negative
                     } else if d.abs() < 15.0 {
-                        Color::Yellow
+                        theme::c().accent_amber
                     } else {
-                        Color::Gray
+                        theme::c().neutral
                     };
                     (fmt_px(liq), format!("{d:+.1}"), c)
                 }
-                Some(liq) => (fmt_px(liq), "—".into(), Color::Gray),
-                None => ("—".into(), "—".into(), Color::DarkGray),
+                Some(liq) => (fmt_px(liq), "—".into(), theme::c().neutral),
+                None => ("—".into(), "—".into(), theme::c().muted),
             };
-            // Posición recién abierta (<24h): marca "•" en magenta —
+            // Posición recién abierta (<24h): marca "•" en el violeta del
+            // tema —
             // deliberadamente fuera de la escala verde/rojo de PnL, que en esta
             // tabla significa ganancia/pérdida y no debe confundirse con esto.
             let is_fresh = v.fresh.get(i).copied().unwrap_or(false);
@@ -786,7 +816,9 @@ pub(super) fn draw_account(
                 Cell::from(Line::from(vec![
                     Span::styled(
                         "•",
-                        Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        Style::new()
+                            .fg(theme::c().accent_magenta)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(p.coin.clone(), Style::new().add_modifier(Modifier::BOLD)),
                 ]))
@@ -800,7 +832,7 @@ pub(super) fn draw_account(
                 Cell::from(fmt_usd(p.position_value)),
                 Cell::from(p.entry_px.map(fmt_px).unwrap_or_else(|| "—".into())),
                 Cell::from(fmt_px(mark)),
-                Cell::from(liq_txt).style(Style::new().fg(Color::Yellow)),
+                Cell::from(liq_txt).style(Style::new().fg(theme::c().accent_amber)),
                 Cell::from(dist_txt).style(Style::new().fg(dist_color)),
                 Cell::from(format!(
                     "{}×{}",
@@ -808,9 +840,9 @@ pub(super) fn draw_account(
                     if p.is_cross { "c" } else { "i" }
                 )),
                 Cell::from(fmt_usd(p.unrealized_pnl))
-                    .style(Style::new().fg(sign_color(Some(p.unrealized_pnl), false))),
+                    .style(Style::new().fg(theme::sign_color(Some(p.unrealized_pnl), false))),
                 Cell::from(format!("{:+.1}", p.roe * 100.0))
-                    .style(Style::new().fg(sign_color(Some(p.roe), false))),
+                    .style(Style::new().fg(theme::sign_color(Some(p.roe), false))),
                 // Antigüedad del tramo actual, con la precisión del dato a la
                 // vista: sin prefijo = fill exacto, "≈" = reconstruida del
                 // funding (precisión de horas), "≥" = solo cota inferior,
@@ -824,22 +856,22 @@ pub(super) fn draw_account(
                         };
                         Cell::from(format!("{mark}{}", age_short(now, o.ms))).style(
                             Style::new().fg(if is_fresh {
-                                Color::Magenta
+                                theme::c().accent_magenta
                             } else if o.kind == OpenKind::LowerBound {
-                                Color::DarkGray
+                                theme::c().muted
                             } else {
-                                Color::Gray
+                                theme::c().neutral
                             }),
                         )
                     }
-                    None => Cell::from("—").style(Style::new().fg(Color::DarkGray)),
+                    None => Cell::from("—").style(Style::new().fg(theme::c().muted)),
                 },
             ]);
             // resalte de la fila seleccionada (solo Vista 9, v.sel = Some)
             if v.sel == Some(i) {
                 row.style(
                     Style::new()
-                        .bg(Color::Rgb(40, 44, 66))
+                        .bg(theme::c().selection_bg)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
@@ -869,7 +901,7 @@ pub(super) fn draw_account(
     ];
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title(title));
+        .block(theme::block().title(title));
     match state {
         // Con estado, el propio widget desplaza la ventana visible para que la
         // fila seleccionada siempre quede a la vista (mismo mecanismo que
@@ -905,7 +937,7 @@ pub fn draw_input(f: &mut Frame, app: &App) {
     let area = Rect::new(r.x + (r.width - w) / 2, r.y + (r.height - h) / 2, w, h);
     f.render_widget(Clear, area);
     let input_span = if app.input_buf.is_empty() {
-        Span::styled("0x…", Style::new().fg(Color::DarkGray))
+        Span::styled("0x…", Style::new().fg(theme::c().muted))
     } else {
         Span::styled(
             app.input_buf.as_str(),
@@ -915,23 +947,23 @@ pub fn draw_input(f: &mut Frame, app: &App) {
     let mut lines = vec![Line::from(vec![
         Span::raw(" "),
         input_span,
-        Span::styled("▏", Style::new().fg(Color::Cyan)),
+        Span::styled("▏", Style::new().fg(theme::c().accent_cyan)),
     ])];
     match &app.input_err {
         Some(e) => lines.push(Line::from(Span::styled(
             format!(" {e}"),
-            Style::new().fg(Color::Red),
+            Style::new().fg(theme::c().negative),
         ))),
         None => lines.push(Line::from(Span::styled(
             crate::i18n::t().wa_input_confirm,
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(theme::c().muted),
         ))),
     }
     f.render_widget(
         Paragraph::new(lines).block(
-            Block::bordered()
+            theme::block()
                 .title(crate::i18n::t().wa_input_title)
-                .border_style(Style::new().fg(Color::Cyan)),
+                .border_style(Style::new().fg(theme::c().accent_cyan)),
         ),
         area,
     );
