@@ -1534,6 +1534,7 @@ static HELP_EN: &[HelpRow] = &[
     HelpRow::Key("mouse wheel", "scroll selection"),
     HelpRow::Key("g / G", "first / last"),
     HelpRow::Key("Enter", "open pair view"),
+    HelpRow::Key("v", "quick score panel (prototype)"),
     HelpRow::Key("s", "cycle sort column"),
     HelpRow::Key("r", "reverse sort"),
     HelpRow::Key(
@@ -1628,6 +1629,7 @@ static HELP_ES: &[HelpRow] = &[
     HelpRow::Key("rueda ratón", "desplazar selección"),
     HelpRow::Key("g / G", "primero / último"),
     HelpRow::Key("Enter", "abrir vista de par"),
+    HelpRow::Key("v", "panel rápido de score (prototipo)"),
     HelpRow::Key("s", "ciclar columna de orden"),
     HelpRow::Key("r", "invertir orden"),
     HelpRow::Key(

@@ -4,12 +4,13 @@
 //! ningún elemento es solo-ratón ni solo-teclado.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::app::App;
 use crate::exec::{self, Confirm, ExecState, Focus, Hit, OrdType, Side, SizeUnit, SlTpEdit};
 
-use super::fmt::{fmt_px, fmt_usd, sign_color};
+use super::fmt::{fmt_px, fmt_usd};
+use super::theme;
 
 const SLIDER_W: u16 = 16;
 
@@ -101,16 +102,20 @@ impl LineB {
 }
 
 fn dim() -> Style {
-    Style::new().fg(Color::DarkGray)
+    Style::new().fg(theme::c().muted)
 }
 
 fn btn() -> Style {
-    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    Style::new()
+        .fg(theme::c().accent_cyan)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn label(b: &mut LineB, txt: &str, focused: bool) -> Rect {
     let st = if focused {
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::new()
+            .fg(theme::c().accent_cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         dim()
     };
@@ -122,11 +127,11 @@ fn label(b: &mut LineB, txt: &str, focused: bool) -> Rect {
 fn chip(b: &mut LineB, txt: &str, on: bool, color: Color) -> Rect {
     let st = if on {
         Style::new()
-            .fg(Color::Black)
+            .fg(theme::c().bg)
             .bg(color)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(Color::Gray)
+        Style::new().fg(theme::c().neutral)
     };
     b.push(format!(" {txt} "), st)
 }
@@ -145,7 +150,7 @@ fn input(b: &mut LineB, val: &str, focused: bool, editing: bool, placeholder: &s
         b.push(val, st);
     }
     if editing {
-        b.push("▏", Style::new().fg(Color::Cyan));
+        b.push("▏", Style::new().fg(theme::c().accent_cyan));
     }
     let pad = 14u16.saturating_sub(b.x - x0);
     if pad > 0 {
@@ -172,13 +177,13 @@ fn draw_form(
 ) {
     let tr = crate::i18n::t();
     let block = if st.real {
-        Block::bordered()
+        theme::block()
             .title(tr.ex_title_real.replacen("{}", net, 1))
-            .border_style(Style::new().fg(Color::Red))
+            .border_style(Style::new().fg(theme::c().negative))
     } else {
-        Block::bordered()
+        theme::block()
             .title(tr.ex_title_mock)
-            .border_style(Style::new().fg(Color::Yellow))
+            .border_style(Style::new().fg(theme::c().accent_amber))
     };
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -224,10 +229,10 @@ fn draw_form(
         let mut b = LineB::new(inner, r);
         let lr = label(&mut b, tr.ex_side, foc == Focus::Side);
         hit(lr, Hit::Focus(Focus::Side), inner);
-        let hr = chip(&mut b, "LONG", long, Color::Green);
+        let hr = chip(&mut b, "LONG", long, theme::c().positive);
         hit(hr, Hit::SetSide(Side::Long), inner);
         b.push("  ", Style::new());
-        let hr = chip(&mut b, "SHORT", !long, Color::Red);
+        let hr = chip(&mut b, "SHORT", !long, theme::c().negative);
         hit(hr, Hit::SetSide(Side::Short), inner);
         b.render(f);
         r += 1;
@@ -249,14 +254,21 @@ fn draw_form(
         let track: String = (0..SLIDER_W)
             .map(|i| if i == pos { '●' } else { '─' })
             .collect();
-        let hr = b.push(track, Style::new().fg(Color::Cyan));
+        // el track se calienta con el apalancamiento: 1× casi neutro, el
+        // máximo del par en coral pleno (intensidad continua, no un umbral)
+        let frac = if max > 1 {
+            (st.lev.saturating_sub(1)) as f64 / (max - 1) as f64
+        } else {
+            0.0
+        };
+        let hr = b.push(track, Style::new().fg(theme::bias_fg(-frac)));
         hit(hr, Hit::LevSlider, inner);
         let hr = b.push(" + ", btn());
         hit(hr, Hit::LevStep(1), inner);
         match &st.lev_edit {
             Some(buf) => {
                 b.push(format!(" {buf}"), Style::new().add_modifier(Modifier::BOLD));
-                b.push("▏", Style::new().fg(Color::Cyan));
+                b.push("▏", Style::new().fg(theme::c().accent_cyan));
                 b.push("×", Style::new());
             }
             None => {
@@ -274,10 +286,20 @@ fn draw_form(
         let mut b = LineB::new(inner, r);
         let lr = label(&mut b, tr.ex_type, foc == Focus::OrdType);
         hit(lr, Hit::Focus(Focus::OrdType), inner);
-        let hr = chip(&mut b, tr.ex_market, st.typ == OrdType::Market, Color::Cyan);
+        let hr = chip(
+            &mut b,
+            tr.ex_market,
+            st.typ == OrdType::Market,
+            theme::c().accent_cyan,
+        );
         hit(hr, Hit::SetType(OrdType::Market), inner);
         b.push("  ", Style::new());
-        let hr = chip(&mut b, tr.ex_limit, st.typ == OrdType::Limit, Color::Cyan);
+        let hr = chip(
+            &mut b,
+            tr.ex_limit,
+            st.typ == OrdType::Limit,
+            theme::c().accent_cyan,
+        );
         hit(hr, Hit::SetType(OrdType::Limit), inner);
         b.render(f);
         r += 1;
@@ -297,7 +319,7 @@ fn draw_form(
         );
         hit(hr, Hit::Edit(Focus::LimitPx), inner);
         if !st.limit_px.is_empty() && exec::parse_num(&st.limit_px).is_none() {
-            b.push(tr.ex_invalid, Style::new().fg(Color::Red));
+            b.push(tr.ex_invalid, Style::new().fg(theme::c().negative));
         } else if let (Some(px), true) = (exec::parse_num(&st.limit_px), mid > 0.0) {
             b.push(
                 format!("({:+.2}{})", (px / mid - 1.0) * 100.0, tr.ex_of_mid),
@@ -315,10 +337,20 @@ fn draw_form(
         let editing = st.editing && foc == Focus::Size;
         let hr = input(&mut b, &st.size, foc == Focus::Size, editing, tr.ex_ph_size);
         hit(hr, Hit::Edit(Focus::Size), inner);
-        let hr = chip(&mut b, "USD", st.unit == SizeUnit::Usd, Color::Cyan);
+        let hr = chip(
+            &mut b,
+            "USD",
+            st.unit == SizeUnit::Usd,
+            theme::c().accent_cyan,
+        );
         hit(hr, Hit::SetUnit(SizeUnit::Usd), inner);
         b.push(" ", Style::new());
-        let hr = chip(&mut b, coin, st.unit == SizeUnit::Asset, Color::Cyan);
+        let hr = chip(
+            &mut b,
+            coin,
+            st.unit == SizeUnit::Asset,
+            theme::c().accent_cyan,
+        );
         hit(hr, Hit::SetUnit(SizeUnit::Asset), inner);
         b.render(f);
         r += 1;
@@ -363,12 +395,12 @@ fn draw_form(
                             b.push(format!("→ {} {pct:+.1}%", fmt_px(px)), dim());
                         }
                         Some(err) => {
-                            b.push(format!("✗ {err}"), Style::new().fg(Color::Red));
+                            b.push(format!("✗ {err}"), Style::new().fg(theme::c().negative));
                         }
                     }
                 }
                 Err(err) => {
-                    b.push(format!("✗ {err}"), Style::new().fg(Color::Red));
+                    b.push(format!("✗ {err}"), Style::new().fg(theme::c().negative));
                 }
             }
         }
@@ -395,7 +427,9 @@ fn draw_form(
             (Some(l), Some(e)) => {
                 b.push(
                     format!("{} ({:+.1}%)", fmt_px(l), (l / e - 1.0) * 100.0),
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::c().accent_amber)
+                        .add_modifier(Modifier::BOLD),
                 );
                 b.push(tr.ex_isolated, dim());
             }
@@ -431,7 +465,9 @@ fn draw_form(
             Some((a, unified)) => {
                 let req = sizes.map(|(usd, _)| usd / st.lev.max(1) as f64);
                 let st_a = if req.is_some_and(|req| req > a) {
-                    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    Style::new()
+                        .fg(theme::c().negative)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::new()
                 };
@@ -446,7 +482,7 @@ fn draw_form(
                     dim(),
                 );
                 if req.is_some_and(|req| req > a) {
-                    b.push(tr.ex_insufficient, Style::new().fg(Color::Red));
+                    b.push(tr.ex_insufficient, Style::new().fg(theme::c().negative));
                 }
             }
             None => {
@@ -463,11 +499,13 @@ fn draw_form(
         b.push("  ", Style::new());
         let bs = if foc == Focus::Submit {
             Style::new()
-                .fg(Color::Black)
-                .bg(Color::Green)
+                .fg(theme::c().bg)
+                .bg(theme::c().positive)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::new()
+                .fg(theme::c().positive)
+                .add_modifier(Modifier::BOLD)
         };
         let hr = b.push(tr.ex_review, bs);
         hit(hr, Hit::Submit, inner);
@@ -480,7 +518,7 @@ fn draw_form(
             f.render_widget(
                 Paragraph::new(Span::styled(
                     format!("  ✗ {e}"),
-                    Style::new().fg(Color::Red),
+                    Style::new().fg(theme::c().negative),
                 ))
                 .wrap(Wrap { trim: false }),
                 Rect::new(inner.x, inner.y + r, inner.width, left),
@@ -519,7 +557,11 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
         "SL",
         "TP",
     ])
-    .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(
+        Style::new()
+            .fg(theme::c().neutral)
+            .add_modifier(Modifier::BOLD),
+    );
     let body: Vec<Row> = st
         .positions
         .iter()
@@ -542,29 +584,33 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
                 Cell::from(p.coin.clone()).style(Style::new().add_modifier(Modifier::BOLD)),
                 Cell::from(if long { "LONG" } else { "SHORT" }).style(
                     Style::new()
-                        .fg(if long { Color::Green } else { Color::Red })
+                        .fg(if long {
+                            theme::c().positive
+                        } else {
+                            theme::c().negative
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 Cell::from(format!("{:+.4}", p.szi)),
                 Cell::from(fmt_px(p.entry)),
                 Cell::from(fmt_px(mark)),
-                Cell::from(opt(liq)).style(Style::new().fg(Color::Yellow)),
+                Cell::from(opt(liq)).style(Style::new().fg(theme::c().accent_amber)),
                 Cell::from(format!("{}×", p.lev)),
                 Cell::from(
                     pnl.map(|v| format!("{v:+.2}"))
                         .unwrap_or_else(|| "—".into()),
                 )
-                .style(Style::new().fg(sign_color(pnl, false))),
+                .style(Style::new().fg(theme::sign_color(pnl, false))),
                 Cell::from(
                     roe.map(|v| format!("{v:+.1}"))
                         .unwrap_or_else(|| "—".into()),
                 )
-                .style(Style::new().fg(sign_color(roe, false))),
+                .style(Style::new().fg(theme::sign_color(roe, false))),
                 Cell::from(opt(p.sl)),
                 Cell::from(opt(p.tp)),
             ]);
             if st.focus == Focus::Pos(i) {
-                row = row.style(Style::new().bg(Color::DarkGray));
+                row = row.style(Style::new().bg(theme::c().selection_bg));
             }
             row
         })
@@ -591,10 +637,10 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
     f.render_widget(
         Table::new(body, widths)
             .header(header)
-            .block(Block::bordered().title(title)),
+            .block(theme::block().title(title)),
         rows[0],
     );
-    let tin = Block::bordered().inner(rows[0]);
+    let tin = theme::block().inner(rows[0]);
     for i in 0..st.positions.len() {
         let y = tin.y + 1 + i as u16;
         if y < tin.bottom() {
@@ -606,7 +652,7 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
     {
         let on_pos = matches!(st.focus, Focus::Pos(_));
         let bs = if on_pos {
-            Style::new().fg(Color::Black).bg(Color::Cyan)
+            Style::new().fg(theme::c().bg).bg(theme::c().accent_cyan)
         } else {
             dim()
         };
@@ -632,7 +678,11 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
         tr.ex_size,
         tr.ex_col_ntl,
     ])
-    .style(Style::new().fg(Color::Gray).add_modifier(Modifier::BOLD));
+    .style(
+        Style::new()
+            .fg(theme::c().neutral)
+            .add_modifier(Modifier::BOLD),
+    );
     let body: Vec<Row> = st
         .orders
         .iter()
@@ -643,16 +693,16 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
                 Cell::from(o.coin.clone()).style(Style::new().add_modifier(Modifier::BOLD)),
                 Cell::from(o.kind.label()),
                 Cell::from(o.side.label()).style(Style::new().fg(if long {
-                    Color::Green
+                    theme::c().positive
                 } else {
-                    Color::Red
+                    theme::c().negative
                 })),
                 Cell::from(fmt_px(o.px)),
                 Cell::from(format!("{:.4}", o.sz)),
                 Cell::from(fmt_usd(o.px * o.sz)),
             ]);
             if st.focus == Focus::Ord(i) {
-                row = row.style(Style::new().bg(Color::DarkGray));
+                row = row.style(Style::new().bg(theme::c().selection_bg));
             }
             row
         })
@@ -674,10 +724,10 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
     f.render_widget(
         Table::new(body, widths)
             .header(header)
-            .block(Block::bordered().title(title)),
+            .block(theme::block().title(title)),
         rows[2],
     );
-    let oin = Block::bordered().inner(rows[2]);
+    let oin = theme::block().inner(rows[2]);
     for i in 0..st.orders.len() {
         let y = oin.y + 1 + i as u16;
         if y < oin.bottom() {
@@ -689,7 +739,7 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
     {
         let on_ord = matches!(st.focus, Focus::Ord(_));
         let bs = if on_ord {
-            Style::new().fg(Color::Black).bg(Color::Cyan)
+            Style::new().fg(theme::c().bg).bg(theme::c().accent_cyan)
         } else {
             dim()
         };
@@ -699,9 +749,9 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
         hits.push((hr.intersection(rows[3]), Hit::CancelOrd));
         b.push("  ", Style::new());
         if let Some(e) = &st.err {
-            b.push(format!("✗ {e}"), Style::new().fg(Color::Red));
+            b.push(format!("✗ {e}"), Style::new().fg(theme::c().negative));
         } else if let Some(s) = &st.status {
-            b.push(format!("✓ {s}"), Style::new().fg(Color::Green));
+            b.push(format!("✓ {s}"), Style::new().fg(theme::c().positive));
         } else if st.real {
             let agent = app
                 .trade
@@ -718,7 +768,7 @@ fn draw_right(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>)
             // corto a propósito: la columna puede ser estrecha
             b.push(
                 tr.ex_real_agent_signs.replacen("{}", &agent, 1),
-                Style::new().fg(Color::Red),
+                Style::new().fg(theme::c().negative),
             );
         } else {
             b.push(tr.ex_mock_nothing_sent, dim());
@@ -754,11 +804,15 @@ fn agent_expiry_span(b: &mut LineB, t: &crate::app::TradeArm) {
     if life == Life::Expired {
         b.push(
             tr.ex_agent_expired.replacen("{}", &date, 1),
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().negative)
+                .add_modifier(Modifier::BOLD),
         );
         b.push(
             tr.ex_agent_relay_hint,
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().negative)
+                .add_modifier(Modifier::BOLD),
         );
         return;
     }
@@ -775,9 +829,13 @@ fn agent_expiry_span(b: &mut LineB, t: &crate::app::TradeArm) {
         return;
     }
     let style = match life {
-        Life::Countdown => Style::new().fg(Color::Green),
-        Life::Amber => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        _ => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Life::Countdown => Style::new().fg(theme::c().positive),
+        Life::Amber => Style::new()
+            .fg(theme::c().accent_amber)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::new()
+            .fg(theme::c().negative)
+            .add_modifier(Modifier::BOLD),
     };
     b.push(
         tr.ex_agent_countdown
@@ -801,9 +859,13 @@ fn registration_span(b: &mut LineB, t: &crate::app::TradeArm) {
         Registration::Listed { .. } => return,
         Registration::NotListed => b.push(
             tr.ex_reg_not_listed,
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().negative)
+                .add_modifier(Modifier::BOLD),
         ),
-        Registration::Unknown { .. } => b.push(tr.ex_reg_unknown, Style::new().fg(Color::Yellow)),
+        Registration::Unknown { .. } => {
+            b.push(tr.ex_reg_unknown, Style::new().fg(theme::c().accent_amber))
+        }
     };
 }
 
@@ -854,8 +916,8 @@ pub(crate) fn modal_buttons(
     let hr = b.push(
         format!(" y {yes} "),
         Style::new()
-            .fg(Color::Black)
-            .bg(Color::Green)
+            .fg(theme::c().bg)
+            .bg(theme::c().positive)
             .add_modifier(Modifier::BOLD),
     );
     hits.push((hr.intersection(inner), Hit::ConfirmYes));
@@ -863,8 +925,8 @@ pub(crate) fn modal_buttons(
     let hr = b.push(
         crate::i18n::t().ex_btn_cancel,
         Style::new()
-            .fg(Color::Black)
-            .bg(Color::Gray)
+            .fg(theme::c().bg)
+            .bg(theme::c().neutral)
             .add_modifier(Modifier::BOLD),
     );
     hits.push((hr.intersection(inner), Hit::ConfirmNo));
@@ -890,12 +952,14 @@ fn draw_confirm(f: &mut Frame, app: &App, c: &Confirm, hits: &mut Vec<(Rect, Hit
                 tr.ex_note_real
                     .replacen("{}", net, 1)
                     .replacen("{}", accion, 1),
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().negative)
+                    .add_modifier(Modifier::BOLD),
             ))
         } else {
             Line::from(Span::styled(
                 tr.ex_note_mock,
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ))
         }
     };
@@ -908,9 +972,9 @@ fn draw_confirm(f: &mut Frame, app: &App, c: &Confirm, hits: &mut Vec<(Rect, Hit
                 .unwrap_or(4);
             let side_st = Style::new()
                 .fg(if d.side.is_long() {
-                    Color::Green
+                    theme::c().positive
                 } else {
-                    Color::Red
+                    theme::c().negative
                 })
                 .add_modifier(Modifier::BOLD);
             let trig = |v: Option<f64>| match v {
@@ -944,7 +1008,9 @@ fn draw_confirm(f: &mut Frame, app: &App, c: &Confirm, hits: &mut Vec<(Rect, Hit
                         Some(l) => format!("{} ({:+.1}%)", fmt_px(l), (l / d.entry - 1.0) * 100.0),
                         None => tr.ex_no_liq_1x.into(),
                     },
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::c().accent_amber)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 kv(tr.ex_sl, trig(d.sl), Style::new()),
                 kv(tr.ex_tp, trig(d.tp), Style::new()),
@@ -984,7 +1050,11 @@ fn draw_confirm(f: &mut Frame, app: &App, c: &Confirm, hits: &mut Vec<(Rect, Hit
                         .replacen("{}", if long { "LONG" } else { "SHORT" }, 1)
                         .replacen("{}", &format!("{:+.4}", p.szi), 1),
                     Style::new()
-                        .fg(if long { Color::Green } else { Color::Red })
+                        .fg(if long {
+                            theme::c().positive
+                        } else {
+                            theme::c().negative
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 kv(
@@ -1019,22 +1089,29 @@ fn draw_confirm(f: &mut Frame, app: &App, c: &Confirm, hits: &mut Vec<(Rect, Hit
         lines.push(Line::from(vec![
             Span::styled(
                 tr.ex_type_phrase.replacen("{}", exec::MAINNET_PHRASE, 1),
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().negative)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{typed}▏"),
                 Style::new()
-                    .fg(if ok { Color::Green } else { Color::White })
+                    .fg(if ok {
+                        theme::c().positive
+                    } else {
+                        theme::c().fg_strong
+                    })
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
     }
     let h = lines.len() as u16 + 4;
     let area = centered(58, h, f.area());
+    super::shadow::draw(f, area);
     f.render_widget(Clear, area);
-    let block = Block::bordered()
+    let block = theme::block()
         .title(title)
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::c().accent_cyan));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let n = lines.len() as u16;
@@ -1055,15 +1132,16 @@ fn draw_sltp(f: &mut Frame, app: &App, m: &SlTpEdit, hits: &mut Vec<(Rect, Hit)>
     let tr = crate::i18n::t();
     let long = p.is_long();
     let area = centered(54, 9, f.area());
+    super::shadow::draw(f, area);
     f.render_widget(Clear, area);
-    let block = Block::bordered()
+    let block = theme::block()
         .title(
             tr.ex_sltp_title
                 .replacen("{}", &p.coin, 1)
                 .replacen("{}", if long { "LONG" } else { "SHORT" }, 1)
                 .replacen("{}", &fmt_px(p.entry), 1),
         )
-        .border_style(Style::new().fg(Color::Cyan));
+        .border_style(Style::new().fg(theme::c().accent_cyan));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1087,19 +1165,19 @@ fn draw_sltp(f: &mut Frame, app: &App, m: &SlTpEdit, hits: &mut Vec<(Rect, Hit)>
                         b.push(format!("→ {} ({pct:+.1}%)", fmt_px(px)), dim());
                     }
                     Some(e) => {
-                        b.push(format!("✗ {e}"), Style::new().fg(Color::Red));
+                        b.push(format!("✗ {e}"), Style::new().fg(theme::c().negative));
                     }
                 }
             }
             Ok(None) => {}
             Err(e) => {
-                b.push(format!("✗ {e}"), Style::new().fg(Color::Red));
+                b.push(format!("✗ {e}"), Style::new().fg(theme::c().negative));
             }
         }
         b.render(f);
     }
     let hint = match &m.err {
-        Some(e) => Span::styled(format!("  ✗ {e}"), Style::new().fg(Color::Red)),
+        Some(e) => Span::styled(format!("  ✗ {e}"), Style::new().fg(theme::c().negative)),
         None => Span::styled(tr.ex_sltp_hint, dim()),
     };
     if inner.height > 3 {

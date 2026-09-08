@@ -403,6 +403,18 @@ pub fn bias_fg(t: f64) -> Color {
     mix(p.neutral, accent, 0.35 + 0.65 * t.abs())
 }
 
+/// Color de la sombra de los paneles flotantes (ver `super::shadow`).
+/// Derivado del fondo ACTIVO: en oscuro se hunde hacia el negro, en claro se
+/// oscurece lo justo para leerse como sombra y no como un agujero.
+pub fn shadow_bg() -> Color {
+    let p = c();
+    let negro = Color::Rgb(0, 0, 0);
+    match theme() {
+        Theme::Dark => mix(p.bg, negro, 0.55),
+        Theme::Light => mix(p.bg, negro, 0.30),
+    }
+}
+
 // ── forma del borde ───────────────────────────────────────────────────────
 
 /// Aspecto del marco. El usuario busca algo "cuadrado, de terminal vieja";
@@ -502,11 +514,11 @@ pub fn row_highlight() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// Color por signo, con los tonos del tema. Espeja exactamente la semántica
-/// de `fmt::sign_color` (incluido `invert`, para métricas donde positivo es
-/// "caliente" — funding positivo = los longs pagan = desfavorable); solo
-/// cambian los tonos. Se define aquí en vez de tocar `fmt::sign_color` porque
-/// esa la comparten casi todas las vistas y el piloto es solo la Vista 1.
+/// Color por signo. `invert` para métricas donde positivo es "caliente"
+/// (funding positivo = los longs pagan = desfavorable). Nació como gemelo
+/// temático de `fmt::sign_color` durante el piloto de la Vista 1; ahora que
+/// las 9 vistas usan el tema, aquella se quedó sin usuarios y esta es la
+/// única implementación.
 pub fn sign_color(v: Option<f64>, invert: bool) -> Color {
     let p = c();
     match v {
@@ -604,13 +616,13 @@ mod tests {
         for th in [Theme::Dark, Theme::Light] {
             set_theme(th);
             let p = c();
+            // positivo (o negativo con `invert`, como el funding) = familia
+            // verde; lo contrario = familia roja
             for (v, invert) in [(Some(1.0), false), (Some(-1.0), true)] {
                 assert_eq!(sign_color(v, invert), p.positive);
-                assert_eq!(super::super::fmt::sign_color(v, invert), Color::Green);
             }
             for (v, invert) in [(Some(-1.0), false), (Some(1.0), true)] {
                 assert_eq!(sign_color(v, invert), p.negative);
-                assert_eq!(super::super::fmt::sign_color(v, invert), Color::Red);
             }
             // cero real y "sin dato" siguen siendo distinguibles
             assert_eq!(sign_color(Some(0.0), false), p.neutral);

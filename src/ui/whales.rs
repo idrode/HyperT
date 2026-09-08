@@ -72,6 +72,7 @@ pub(super) fn draw_addr_overlay(
         w,
         h,
     );
+    super::shadow::draw(f, r);
     f.render_widget(Clear, r);
 
     let s = crate::i18n::t();

@@ -546,6 +546,7 @@ fn draw_pos_modal(f: &mut Frame, app: &App, area: Rect) {
         w,
         h,
     );
+    super::shadow::draw(f, r);
     f.render_widget(Clear, r);
     f.render_widget(
         Paragraph::new(lines).block(
@@ -935,6 +936,7 @@ pub fn draw_input(f: &mut Frame, app: &App) {
     let h = 5u16.min(f.area().height);
     let r = f.area();
     let area = Rect::new(r.x + (r.width - w) / 2, r.y + (r.height - h) / 2, w, h);
+    super::shadow::draw(f, area);
     f.render_widget(Clear, area);
     let input_span = if app.input_buf.is_empty() {
         Span::styled("0x…", Style::new().fg(theme::c().muted))

@@ -1,7 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ratatui::style::Color;
-
 /// Hora local del cierre de una vela (dd/mm HH:MM), para los hovers.
 pub fn time_label(t_ms: u64) -> String {
     use chrono::{Local, TimeZone};
@@ -97,22 +95,5 @@ pub fn fmt_opt(v: Option<f64>, dec: usize) -> String {
     match v {
         Some(x) => format!("{x:+.dec$}"),
         None => "—".to_string(),
-    }
-}
-
-/// Color por signo. `invert` para métricas donde positivo es "caliente"
-/// (p. ej. funding positivo = longs pagan = rojo).
-pub fn sign_color(v: Option<f64>, invert: bool) -> Color {
-    match v {
-        None => Color::DarkGray,
-        Some(0.0) => Color::Gray,
-        Some(x) => {
-            let good = if invert { x < 0.0 } else { x > 0.0 };
-            if good {
-                Color::Green
-            } else {
-                Color::Red
-            }
-        }
     }
 }

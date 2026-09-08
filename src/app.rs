@@ -1203,6 +1203,10 @@ pub struct App {
     pub heat_metric: HeatMetric,
     pub interval: Interval,
     pub show_help: bool,
+    /// PROTOTIPO (Vista 1, tecla `v`): panel lateral con el resumen del score
+    /// compuesto del par seleccionado. Solo en memoria, como el resto de
+    /// estado de UI.
+    pub quick_score: bool,
     /// Indicadores visibles del sub-panel TA de la Vista 2 (selector libre).
     pub ind: IndSel,
     /// Líneas visibles del panel de la Vista 3 (selector libre). SOLO afecta
@@ -1496,6 +1500,7 @@ impl App {
             heat_metric: HeatMetric::FundApr,
             interval: Interval::H1,
             show_help: false,
+            quick_score: false,
             ind: IndSel::default(),
             ind3: Ind3Sel::default(),
             ind_ui: None,
@@ -4251,6 +4256,9 @@ impl App {
                 KeyCode::Home | KeyCode::Char('g') => self.sel = 0,
                 KeyCode::End | KeyCode::Char('G') => self.sel = self.pairs.len().saturating_sub(1),
                 KeyCode::Enter => self.enter_pair_from_sel(),
+                // `v` = vista rápida del score del par seleccionado
+                KeyCode::Char('v') => self.quick_score = !self.quick_score,
+                KeyCode::Esc if self.quick_score => self.quick_score = false,
                 KeyCode::Char('/') => self.search.open(),
                 KeyCode::Char('s') => {
                     // mantener el par seleccionado al cambiar de orden

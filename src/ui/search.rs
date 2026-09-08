@@ -15,6 +15,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     let w = a.width.min(48);
     let area = Rect::new(a.x + 1, a.y + a.height - h - 1, w, h);
+    super::shadow::draw(f, area);
     f.render_widget(Clear, area);
 
     let n = app.search_results().len();

@@ -9,6 +9,7 @@ pub fn draw(f: &mut Frame) {
     // de Fondos/Flujo no llegaban a verse nunca.
     let h = i18n::help_rows().len() as u16 + 2;
     let area = centered(72, h, f.area());
+    super::shadow::draw(f, area);
     f.render_widget(Clear, area);
 
     let key = |k: &str, desc: &str| {

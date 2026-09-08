@@ -1,7 +1,9 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use crate::app::{App, DepositUi, TransferUi, WithdrawUi};
+
+use super::theme;
 use crate::exec::Hit;
 use crate::wallet::walletconnect::{
     fmt_usdc, AgentStatus, DepositStatus, TransferStatus, WcStatus, WithdrawStatus,
@@ -18,7 +20,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         expires_at,
     } = &app.wc
     {
-        let block = Block::bordered().title(crate::i18n::t().fu_qr_title);
+        let block = theme::block().title(crate::i18n::t().fu_qr_title);
         let inner = block.inner(area);
         f.render_widget(block, area);
         let left = expires_at.saturating_duration_since(std::time::Instant::now());
@@ -150,7 +152,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_spot_strip(f: &mut Frame, app: &App, area: Rect) {
     let tr = crate::i18n::t();
     let unified = app.is_unified();
-    let block = Block::bordered().title(if unified {
+    let block = theme::block().title(if unified {
         tr.fu_spot_unified_title
     } else {
         tr.fu_spot_title
@@ -160,7 +162,7 @@ fn draw_spot_strip(f: &mut Frame, app: &App, area: Rect) {
     let line = match &app.spot {
         None => Line::from(Span::styled(
             tr.fu_spot_loading,
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         Some(s) => {
             let age = app
@@ -211,7 +213,7 @@ fn draw_spot_strip(f: &mut Frame, app: &App, area: Rect) {
 /// aceptada → reflejada en el saldo destino (o fallo con motivo).
 fn draw_transfer_strip(f: &mut Frame, xf: &TransferStatus, area: Rect) {
     let tr = crate::i18n::t();
-    let block = Block::bordered().title(tr.fu_xfer_strip_title);
+    let block = theme::block().title(tr.fu_xfer_strip_title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let dir = |to_perp: bool| {
@@ -226,14 +228,14 @@ fn draw_transfer_strip(f: &mut Frame, xf: &TransferStatus, area: Rect) {
             tr.fu_xfer_awaiting
                 .replacen("{}", &format!("{usdc:.2}"), 1)
                 .replacen("{}", dir(*to_perp), 1),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         TransferStatus::Accepted { usdc, to_perp } => Line::from(vec![
             Span::styled(
                 tr.fu_xfer_accepted
                     .replacen("{}", &format!("{usdc:.2}"), 1)
                     .replacen("{}", dir(*to_perp), 1),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ),
             dim(tr.fu_xfer_watching),
         ]),
@@ -242,16 +244,20 @@ fn draw_transfer_strip(f: &mut Frame, xf: &TransferStatus, area: Rect) {
                 tr.fu_xfer_done
                     .replacen("{}", &format!("{usdc:.2}"), 1)
                     .replacen("{}", dir(*to_perp), 1),
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().positive)
+                    .add_modifier(Modifier::BOLD),
             ),
             dim(tr.fu_xfer_reflected),
         ]),
         TransferStatus::Failed { error } => Line::from(vec![
             Span::styled(
                 tr.fu_xfer_failed,
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().negative)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(error.clone(), Style::new().fg(Color::Red)),
+            Span::styled(error.clone(), Style::new().fg(theme::c().negative)),
         ]),
     };
     f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), inner);
@@ -269,8 +275,10 @@ fn draw_transfer_modal(f: &mut Frame, app: &mut App) {
     };
     let tr = crate::i18n::t();
     let bold = Style::new().add_modifier(Modifier::BOLD);
-    let red = Style::new().fg(Color::Red);
-    let cyan = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let red = Style::new().fg(theme::c().negative);
+    let cyan = Style::new()
+        .fg(theme::c().accent_cyan)
+        .add_modifier(Modifier::BOLD);
     let mut hits: Vec<(Rect, Hit)> = Vec::new();
     let dir_label = |to_perp: bool| {
         if to_perp {
@@ -282,10 +290,11 @@ fn draw_transfer_modal(f: &mut Frame, app: &mut App) {
     match ui {
         TransferUi::Amount { to_perp, buf, err } => {
             let area = super::exec::centered(70, 11, f.area());
+            super::shadow::draw(f, area);
             f.render_widget(Clear, area);
-            let block = Block::bordered()
+            let block = theme::block()
                 .title(tr.fu_xfer_modal_title.replacen("{}", route.hl_chain, 1))
-                .border_style(Style::new().fg(Color::Yellow));
+                .border_style(Style::new().fg(theme::c().accent_amber));
             let inner = block.inner(area);
             f.render_widget(block, area);
             let avail = if to_perp {
@@ -332,10 +341,11 @@ fn draw_transfer_modal(f: &mut Frame, app: &mut App) {
             units,
         } => {
             let area = super::exec::centered(74, 12, f.area());
+            super::shadow::draw(f, area);
             f.render_widget(Clear, area);
-            let block = Block::bordered()
+            let block = theme::block()
                 .title(tr.fu_xfer_confirm_title)
-                .border_style(Style::new().fg(Color::Yellow));
+                .border_style(Style::new().fg(theme::c().accent_amber));
             let inner = block.inner(area);
             f.render_widget(block, area);
             let kv = |k: &str, v: String, st: Style| {
@@ -353,7 +363,9 @@ fn draw_transfer_modal(f: &mut Frame, app: &mut App) {
                 kv(
                     tr.fu_kv_direction,
                     dir_label(to_perp).to_string(),
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::c().accent_amber)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Line::from(dim(tr.fu_xfer_note1)),
                 Line::from(dim(tr.fu_xfer_note2)),
@@ -377,13 +389,13 @@ fn draw_usdc_strip(f: &mut Frame, app: &App, chain: &str, area: Rect) {
         l => l,
     };
     let tr = crate::i18n::t();
-    let block = Block::bordered().title(tr.fu_onchain_title.replacen("{}", net, 1));
+    let block = theme::block().title(tr.fu_onchain_title.replacen("{}", net, 1));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let line = match app.usdc {
         None => Line::from(Span::styled(
             tr.fu_rpc_loading,
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         Some(None) => Line::from(dim(tr.fu_no_usdc_read)),
         Some(Some(v)) => {
@@ -415,34 +427,38 @@ fn draw_usdc_strip(f: &mut Frame, app: &App, chain: &str, area: Rect) {
 /// confirmada on-chain (o fallo). Queda visible hasta el siguiente depósito.
 fn draw_deposit_strip(f: &mut Frame, dep: &DepositStatus, area: Rect) {
     let tr = crate::i18n::t();
-    let block = Block::bordered().title(tr.fu_dep_strip_title);
+    let block = theme::block().title(tr.fu_dep_strip_title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let line = match dep {
         DepositStatus::AwaitingWallet { usdc } => Line::from(Span::styled(
             tr.fu_dep_awaiting.replacen("{}", &format!("{usdc:.2}"), 1),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         DepositStatus::Submitted { usdc, tx } => Line::from(vec![
             Span::styled(
                 tr.fu_dep_signed.replacen("{}", &format!("{usdc:.2}"), 1),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ),
             dim(tr.fu_dep_waiting_chain.replacen("{}", tx, 1)),
         ]),
         DepositStatus::Confirmed { usdc, tx } => Line::from(vec![
             Span::styled(
                 tr.fu_dep_confirmed.replacen("{}", &format!("{usdc:.2}"), 1),
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().positive)
+                    .add_modifier(Modifier::BOLD),
             ),
             dim(tr.fu_dep_credits.replacen("{}", tx, 1)),
         ]),
         DepositStatus::Failed { error } => Line::from(vec![
             Span::styled(
                 tr.fu_dep_failed,
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().negative)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(error.clone(), Style::new().fg(Color::Red)),
+            Span::styled(error.clone(), Style::new().fg(theme::c().negative)),
         ]),
     };
     f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), inner);
@@ -452,25 +468,27 @@ fn draw_deposit_strip(f: &mut Frame, dep: &DepositStatus, area: Rect) {
 /// Hyperliquid → USDC llegado a la wallet (o fallo con motivo).
 fn draw_withdraw_strip(f: &mut Frame, wd: &WithdrawStatus, area: Rect) {
     let tr = crate::i18n::t();
-    let block = Block::bordered().title(tr.fu_wd_strip_title);
+    let block = theme::block().title(tr.fu_wd_strip_title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let line = match wd {
         WithdrawStatus::AwaitingWallet { usdc } => Line::from(Span::styled(
             tr.fu_wd_awaiting.replacen("{}", &format!("{usdc:.2}"), 1),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         WithdrawStatus::Accepted { usdc } => Line::from(vec![
             Span::styled(
                 tr.fu_wd_accepted.replacen("{}", &format!("{usdc:.2}"), 1),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ),
             dim(tr.fu_wd_processing),
         ]),
         WithdrawStatus::Arrived { usdc } => Line::from(vec![
             Span::styled(
                 tr.fu_wd_done,
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().positive)
+                    .add_modifier(Modifier::BOLD),
             ),
             dim(tr
                 .fu_wd_net_detail
@@ -480,9 +498,11 @@ fn draw_withdraw_strip(f: &mut Frame, wd: &WithdrawStatus, area: Rect) {
         WithdrawStatus::Failed { error } => Line::from(vec![
             Span::styled(
                 tr.fu_wd_failed,
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().negative)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(error.clone(), Style::new().fg(Color::Red)),
+            Span::styled(error.clone(), Style::new().fg(theme::c().negative)),
         ]),
     };
     f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), inner);
@@ -492,7 +512,7 @@ fn draw_withdraw_strip(f: &mut Frame, wd: &WithdrawStatus, area: Rect) {
 /// aceptada + clave guardada → verificada en extraAgents (o fallo).
 fn draw_agent_strip(f: &mut Frame, ag: &AgentStatus, area: Rect) {
     let tr = crate::i18n::t();
-    let block = Block::bordered().title(tr.fu_ag_strip_title);
+    let block = theme::block().title(tr.fu_ag_strip_title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let short = |a: &str| {
@@ -505,35 +525,39 @@ fn draw_agent_strip(f: &mut Frame, ag: &AgentStatus, area: Rect) {
     let line = match ag {
         AgentStatus::AwaitingWallet { agent } => Line::from(Span::styled(
             tr.fu_ag_awaiting.replacen("{}", &short(agent), 1),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         AgentStatus::Accepted { agent, path } => Line::from(vec![
             Span::styled(
                 tr.fu_ag_authorized.replacen("{}", &short(agent), 1),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ),
             dim(tr.fu_ag_checking.replacen("{}", path, 1)),
         ]),
         AgentStatus::Verified { agent, path } => Line::from(vec![
             Span::styled(
                 tr.fu_ag_verified.replacen("{}", &short(agent), 1),
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().positive)
+                    .add_modifier(Modifier::BOLD),
             ),
             dim(tr.fu_ag_verified_detail.replacen("{}", path, 1)),
         ]),
         AgentStatus::Unlisted { agent, path } => Line::from(vec![
             Span::styled(
                 tr.fu_ag_ok_exchange.replacen("{}", &short(agent), 1),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             ),
             dim(tr.fu_ag_not_listed.replacen("{}", path, 1)),
         ]),
         AgentStatus::Failed { error } => Line::from(vec![
             Span::styled(
                 tr.fu_ag_failed,
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().negative)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(error.clone(), Style::new().fg(Color::Red)),
+            Span::styled(error.clone(), Style::new().fg(theme::c().negative)),
         ]),
     };
     f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), inner);
@@ -557,10 +581,11 @@ fn draw_agent_modal(f: &mut Frame, app: &mut App) {
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let mut hits: Vec<(Rect, Hit)> = Vec::new();
     let area = super::exec::centered(78, 17, f.area());
+    super::shadow::draw(f, area);
     f.render_widget(Clear, area);
-    let block = Block::bordered()
+    let block = theme::block()
         .title(tr.fu_ag_modal_title.replacen("{}", route.hl_chain, 1))
-        .border_style(Style::new().fg(Color::Yellow));
+        .border_style(Style::new().fg(theme::c().accent_amber));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let kv = |k: &str, v: String, st: Style| {
@@ -569,7 +594,7 @@ fn draw_agent_modal(f: &mut Frame, app: &mut App) {
     let replaces = match &ui.replaces {
         Some(prev) => Line::from(Span::styled(
             tr.fu_ag_invalidates.replacen("{}", prev, 1),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         None => Line::from(dim(tr.fu_ag_no_previous)),
     };
@@ -578,11 +603,17 @@ fn draw_agent_modal(f: &mut Frame, app: &mut App) {
         kv(
             tr.fu_kv_agent,
             ui.agent_addr.clone(),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(theme::c().accent_amber)
+                .add_modifier(Modifier::BOLD),
         ),
         Line::from(dim(tr.fu_ag_note1)),
         Line::from(dim(tr.fu_ag_note2)),
-        kv(tr.fu_kv_master, master, Style::new().fg(Color::Cyan)),
+        kv(
+            tr.fu_kv_master,
+            master,
+            Style::new().fg(theme::c().accent_cyan),
+        ),
         kv(tr.fu_kv_perms, tr.fu_ag_perms_val.into(), bold),
         kv(
             tr.fu_kv_key,
@@ -593,7 +624,7 @@ fn draw_agent_modal(f: &mut Frame, app: &mut App) {
                     .to_string(),
                 1,
             ),
-            Style::new().fg(Color::Gray),
+            Style::new().fg(theme::c().neutral),
         ),
         kv(
             tr.fu_kv_validity,
@@ -602,7 +633,7 @@ fn draw_agent_modal(f: &mut Frame, app: &mut App) {
                 &super::fmt::date_label(agent_expiry_preview()),
                 1,
             ),
-            Style::new().fg(Color::Gray),
+            Style::new().fg(theme::c().neutral),
         ),
         replaces,
         Line::raw(""),
@@ -640,15 +671,16 @@ fn draw_withdraw_modal(f: &mut Frame, app: &mut App) {
     };
     let tr = crate::i18n::t();
     let bold = Style::new().add_modifier(Modifier::BOLD);
-    let red = Style::new().fg(Color::Red);
+    let red = Style::new().fg(theme::c().negative);
     let mut hits: Vec<(Rect, Hit)> = Vec::new();
     match ui {
         WithdrawUi::Amount { buf, err } => {
             let area = super::exec::centered(66, 10, f.area());
+            super::shadow::draw(f, area);
             f.render_widget(Clear, area);
-            let block = Block::bordered()
+            let block = theme::block()
                 .title(tr.fu_wd_modal_title.replacen("{}", route.hl_chain, 1))
-                .border_style(Style::new().fg(Color::Yellow));
+                .border_style(Style::new().fg(theme::c().accent_amber));
             let inner = block.inner(area);
             f.render_widget(block, area);
             let lines = vec![
@@ -657,7 +689,9 @@ fn draw_withdraw_modal(f: &mut Frame, app: &mut App) {
                     Span::styled(tr.fu_amount_usdc, bold),
                     Span::styled(
                         format!("{buf}█"),
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::new()
+                            .fg(theme::c().accent_cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ]),
                 Line::from(dim(tr.fu_wd_withdrawable.replacen(
@@ -679,10 +713,11 @@ fn draw_withdraw_modal(f: &mut Frame, app: &mut App) {
         }
         WithdrawUi::Confirm { units, .. } => {
             let area = super::exec::centered(78, 14, f.area());
+            super::shadow::draw(f, area);
             f.render_widget(Clear, area);
-            let block = Block::bordered()
+            let block = theme::block()
                 .title(tr.fu_wd_confirm_title)
-                .border_style(Style::new().fg(Color::Yellow));
+                .border_style(Style::new().fg(theme::c().accent_amber));
             let inner = block.inner(area);
             f.render_widget(block, area);
             let kv = |k: &str, v: String, st: Style| {
@@ -711,7 +746,9 @@ fn draw_withdraw_modal(f: &mut Frame, app: &mut App) {
                 kv(
                     tr.fu_kv_dest,
                     dest,
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::c().accent_amber)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Line::from(dim(tr.fu_wd_dest_note1)),
                 Line::from(dim(tr.fu_wd_dest_note2)),
@@ -747,15 +784,16 @@ fn draw_deposit_modal(f: &mut Frame, app: &mut App) {
         .unwrap_or_else(|_| route.bridge.to_string());
     let tr = crate::i18n::t();
     let bold = Style::new().add_modifier(Modifier::BOLD);
-    let red = Style::new().fg(Color::Red);
+    let red = Style::new().fg(theme::c().negative);
     let mut hits: Vec<(Rect, Hit)> = Vec::new();
     match ui {
         DepositUi::Amount { buf, err } => {
             let area = super::exec::centered(66, 10, f.area());
+            super::shadow::draw(f, area);
             f.render_widget(Clear, area);
-            let block = Block::bordered()
+            let block = theme::block()
                 .title(tr.fu_dep_modal_title)
-                .border_style(Style::new().fg(Color::Yellow));
+                .border_style(Style::new().fg(theme::c().accent_amber));
             let inner = block.inner(area);
             f.render_widget(block, area);
             let lines = vec![
@@ -764,7 +802,9 @@ fn draw_deposit_modal(f: &mut Frame, app: &mut App) {
                     Span::styled(tr.fu_amount_usdc, bold),
                     Span::styled(
                         format!("{buf}█"),
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::new()
+                            .fg(theme::c().accent_cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ]),
                 Line::from(dim(tr.fu_dep_onchain_avail.replacen(
@@ -786,10 +826,11 @@ fn draw_deposit_modal(f: &mut Frame, app: &mut App) {
         }
         DepositUi::Confirm { units, .. } => {
             let area = super::exec::centered(78, 13, f.area());
+            super::shadow::draw(f, area);
             f.render_widget(Clear, area);
-            let block = Block::bordered()
+            let block = theme::block()
                 .title(tr.fu_dep_confirm_title)
-                .border_style(Style::new().fg(Color::Yellow));
+                .border_style(Style::new().fg(theme::c().accent_amber));
             let inner = block.inner(area);
             f.render_widget(block, area);
             let kv = |k: &str, v: String, st: Style| {
@@ -802,12 +843,14 @@ fn draw_deposit_modal(f: &mut Frame, app: &mut App) {
                     tr.fu_dep_amount_val.replacen("{}", &fmt_usdc(units), 1),
                     bold,
                 ),
-                kv(tr.fu_kv_from, from, Style::new().fg(Color::Cyan)),
+                kv(tr.fu_kv_from, from, Style::new().fg(theme::c().accent_cyan)),
                 Line::from(dim(tr.fu_dep_from_note)),
                 kv(
                     tr.fu_kv_dest,
                     bridge,
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::c().accent_amber)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Line::from(dim(tr.fu_dep_dest_note1)),
                 Line::from(dim(tr.fu_dep_dest_note2)),
@@ -823,28 +866,28 @@ fn draw_deposit_modal(f: &mut Frame, app: &mut App) {
 }
 
 fn dim(s: impl Into<String>) -> Span<'static> {
-    Span::styled(s.into(), Style::new().fg(Color::DarkGray))
+    Span::styled(s.into(), Style::new().fg(theme::c().muted))
 }
 
 /// Estado de la cuenta maestra en una línea: la Vista 8 ahora la ocupa el
 /// panel de ejecución (maqueta) y la conexión WC queda como cabecera.
 fn draw_wc_strip(f: &mut Frame, wc: &WcStatus, area: Rect) {
     let tr = crate::i18n::t();
-    let block = Block::bordered().title(tr.fu_wc_strip_title);
+    let block = theme::block().title(tr.fu_wc_strip_title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let line = match wc {
         WcStatus::Idle => Line::from(vec![
-            Span::styled(tr.fu_wc_disconnected, Style::new().fg(Color::Gray)),
+            Span::styled(tr.fu_wc_disconnected, Style::new().fg(theme::c().neutral)),
             dim(tr.fu_wc_connect_hint),
         ]),
         WcStatus::Connecting => Line::from(Span::styled(
             tr.fu_wc_connecting,
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         WcStatus::WaitingSettle => Line::from(Span::styled(
             tr.fu_wc_establishing,
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(theme::c().accent_amber),
         )),
         WcStatus::Connected(s) => {
             let mins = s.since.elapsed().as_secs() / 60;
@@ -862,10 +905,12 @@ fn draw_wc_strip(f: &mut Frame, wc: &WcStatus, area: Rect) {
             Line::from(vec![
                 Span::styled(
                     tr.fu_wc_connected,
-                    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::c().positive)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                Span::styled(s.address.clone(), Style::new().fg(Color::Cyan)),
+                Span::styled(s.address.clone(), Style::new().fg(theme::c().accent_cyan)),
                 dim(tr
                     .fu_wc_session_detail
                     .replacen("{}", chain_label(&s.chain), 1)
@@ -877,9 +922,11 @@ fn draw_wc_strip(f: &mut Frame, wc: &WcStatus, area: Rect) {
         WcStatus::Failed { error } => Line::from(vec![
             Span::styled(
                 tr.fu_wc_failed,
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(theme::c().negative)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(error.clone(), Style::new().fg(Color::Red)),
+            Span::styled(error.clone(), Style::new().fg(theme::c().negative)),
             dim(tr.fu_wc_retry),
         ]),
         // WaitingScan se pinta a pantalla completa antes de llegar aquí
@@ -915,13 +962,13 @@ fn draw_qr(f: &mut Frame, area: Rect, uri: &str, qr: &str, secs_left: u64) {
                     .replacen("{}", &(qr_h + 3).to_string(), 1)
                     .replacen("{}", &area.width.to_string(), 1)
                     .replacen("{}", &area.height.to_string(), 1),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(theme::c().accent_amber),
             )),
             Line::raw(tr.fu_qr_enlarge),
             Line::raw(""),
             Line::from(Span::styled(
                 format!("  {uri}"),
-                Style::new().fg(Color::Cyan),
+                Style::new().fg(theme::c().accent_cyan),
             )),
             Line::raw(""),
             Line::from(dim(tr.fu_qr_expires.replacen(
@@ -961,6 +1008,9 @@ fn draw_qr(f: &mut Frame, area: Rect, uri: &str, qr: &str, secs_left: u64) {
         .map(|l| {
             Line::from(Span::styled(
                 l.to_string(),
+                // EXCEPCIÓN deliberada al tema: blanco/negro literales. Un QR
+                // necesita contraste máximo real para que la cámara lo lea; si
+                // siguiera a la paleta, el tema claro lo dejaría casi ilegible.
                 Style::new().fg(Color::White).bg(Color::Black),
             ))
         })
@@ -972,7 +1022,7 @@ fn draw_qr(f: &mut Frame, area: Rect, uri: &str, qr: &str, secs_left: u64) {
         foot.push(Line::raw(""));
         foot.push(Line::from(Span::styled(
             format!("URI: {uri}"),
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(theme::c().muted),
         )));
     }
     f.render_widget(

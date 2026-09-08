@@ -555,16 +555,19 @@ mod tests {
         app
     }
 
-    /// Las Vistas 6, 7 y 9 ya no pintan con la paleta ANSI del terminal: todo
-    /// su cuerpo sale de `theme.rs`, el marco sigue al tema activo y el
-    /// toggle claro/oscuro las repinta.
+    /// Las Vistas 6, 7, 8 y 9 ya no pintan con la paleta ANSI del terminal:
+    /// todo su cuerpo sale de `theme.rs`, el marco sigue al tema activo y el
+    /// toggle claro/oscuro las repinta. (El QR de WalletConnect es la única
+    /// excepción viva del proyecto — blanco/negro literales para que la cámara
+    /// lo lea — y solo se dibuja con una conexión en curso, que este test no
+    /// monta.)
     #[test]
-    fn vistas_6_7_9_pintan_con_el_tema() {
+    fn vistas_6_7_8_9_pintan_con_el_tema() {
         let _g = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut app = app_con_datos();
         let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
 
-        for view in [View::Flow, View::Whales, View::Wallet] {
+        for view in [View::Flow, View::Whales, View::Wallet, View::Funds] {
             app.view = view;
             for th in [theme::Theme::Dark, theme::Theme::Light] {
                 theme::set_theme(th);
@@ -599,6 +602,226 @@ mod tests {
                 assert_eq!(borde, esperado, "marco de {view:?} con el tema {th:?}");
             }
         }
+        theme::set_theme(theme::Theme::Dark);
+    }
+
+    /// Los modales de la Vista 8 (depósito, retiro, transferencia) heredan el
+    /// fondo del tema: son OPACOS sobre lo que tapan y tampoco traen colores
+    /// ANSI sueltos. (El de agent no se puede montar desde aquí: `AgentUi`
+    /// guarda la clave privada en un campo privado, y así se queda.)
+    #[test]
+    fn los_modales_de_la_vista_8_heredan_el_fondo_del_tema() {
+        use crate::app::{DepositUi, TransferUi, WithdrawUi};
+        use crate::data::types::AccountSnapshot;
+        use crate::wallet::walletconnect::{WcSession, WcStatus};
+
+        let _g = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        for th in [theme::Theme::Dark, theme::Theme::Light] {
+            theme::set_theme(th);
+            let esperado = match th {
+                theme::Theme::Dark => theme::DARK.bg,
+                theme::Theme::Light => theme::LIGHT.bg,
+            };
+            for modal in 0..3 {
+                let mut app = app_con_datos();
+                app.view = View::Funds;
+                // sesión y saldos FALSOS, solo para que los modales lleguen a
+                // dibujarse: nada de esto firma ni llama a la red
+                app.wc = WcStatus::Connected(WcSession {
+                    address: "0x0000000000000000000000000000000000000001".into(),
+                    chain: "eip155:42161".into(),
+                    peer: None,
+                    since: Instant::now(),
+                    session_topic: "test".into(),
+                });
+                app.usdc = Some(Some(100.0));
+                app.funds = Some(AccountSnapshot {
+                    addr: "0x0000000000000000000000000000000000000001".into(),
+                    account_value: 100.0,
+                    withdrawable: 100.0,
+                    total_margin_used: 0.0,
+                    total_ntl_pos: 0.0,
+                    positions: vec![],
+                });
+                match modal {
+                    0 => {
+                        app.deposit_ui = Some(DepositUi::Confirm {
+                            usdc: 5.0,
+                            units: 5_000_000,
+                        })
+                    }
+                    1 => {
+                        app.withdraw_ui = Some(WithdrawUi::Confirm {
+                            usdc: 5.0,
+                            units: 5_000_000,
+                        })
+                    }
+                    _ => {
+                        app.transfer_ui = Some(TransferUi::Confirm {
+                            to_perp: true,
+                            usdc: 5.0,
+                            units: 5_000_000,
+                        })
+                    }
+                }
+                term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+                let buf = term.backend().buffer().clone();
+
+                // que el modal se haya dibujado DE VERDAD (si la ruta no
+                // estuviera montada, `draw_*_modal` sale antes de pintar y el
+                // resto del test pasaría en vacío)
+                let mut txt = String::new();
+                for y in 0..buf.area.height {
+                    for x in 0..buf.area.width {
+                        txt.push_str(buf.cell((x, y)).unwrap().symbol());
+                    }
+                }
+                let tr = crate::i18n::t();
+                let titulo = match modal {
+                    0 => tr.fu_dep_confirm_title,
+                    1 => tr.fu_wd_confirm_title,
+                    _ => tr.fu_xfer_confirm_title,
+                };
+                assert!(
+                    txt.contains(titulo.trim()),
+                    "el modal {modal} no llegó a dibujarse"
+                );
+
+                // el modal se dibuja centrado: la fila del medio del cuerpo
+                // tiene que estar pintada con el fondo del tema, no
+                // transparente sobre lo de debajo
+                let y = buf.area.height / 2;
+                let opacas = (0..buf.area.width)
+                    .filter(|x| buf.cell((*x, y)).unwrap().bg == esperado)
+                    .count();
+                assert!(
+                    opacas > 20,
+                    "el modal {modal} no es opaco con el tema {th:?} \
+                     (solo {opacas} celdas con el fondo del tema)"
+                );
+                for yy in 1..buf.area.height - 1 {
+                    for x in 0..buf.area.width {
+                        let cell = buf.cell((x, yy)).unwrap();
+                        for col in [cell.fg, cell.bg] {
+                            assert!(
+                                matches!(col, Color::Rgb(..) | Color::Reset),
+                                "color ANSI suelto en el modal {modal}: {col:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        theme::set_theme(theme::Theme::Dark);
+    }
+
+    /// PROTOTIPO de la Vista 1: `v` abre el panel lateral con el score del par
+    /// seleccionado (el MISMO que la Vista 6, no un cálculo nuevo), anclado a
+    /// la izquierda, con sombra asomando abajo-derecha; `v` otra vez lo cierra.
+    #[test]
+    fn el_panel_rapido_de_la_vista_1_reusa_el_score_y_lleva_sombra() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let _g = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        theme::set_theme(theme::Theme::Dark);
+        let mut app = app_con_datos();
+        app.view = View::Ranking;
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        let pinta = |term: &mut Terminal<TestBackend>, app: &mut App| {
+            term.draw(|f| crate::ui::draw(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            let mut txt = String::new();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    txt.push_str(buf.cell((x, y)).unwrap().symbol());
+                }
+                txt.push('\n');
+            }
+            (txt, buf)
+        };
+
+        let (sin, _) = pinta(&mut term, &mut app);
+        assert!(!sin.contains("señales"), "cerrado por defecto:\n{sin}");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        let (con, buf) = pinta(&mut term, &mut app);
+
+        // el par del panel es el seleccionado, y su contenido es el score de
+        // la Vista 6 para ESE par, calculado aquí de forma independiente
+        let coin = app.sorted_coins()[app.sel].clone();
+        let s = crate::flow::score(&app.score_inputs(&coin));
+        assert!(
+            con.contains(&format!("⌁ {coin}")),
+            "título del panel:\n{con}"
+        );
+        assert!(
+            con.contains(&format!(
+                "{} de {} señales",
+                s.avail,
+                crate::flow::SCORE_COMPONENTS
+            )),
+            "el desglose honesto sale del score compartido:\n{con}"
+        );
+
+        // sombra: a la derecha del panel hay celdas con el color de sombra del
+        // tema, y no las hay a su izquierda
+        let sombra = theme::shadow_bg();
+        let hay_sombra = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .any(|(x, y)| buf.cell((x, y)).unwrap().bg == sombra);
+        assert!(hay_sombra, "el panel no dibujó sombra:\n{con}");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        let (cerrado, _) = pinta(&mut term, &mut app);
+        assert!(!cerrado.contains("señales"), "`v` cierra:\n{cerrado}");
+        theme::set_theme(theme::Theme::Dark);
+    }
+
+    /// REGRESIÓN del panic `index out of bounds: the len is 32 but the index
+    /// is 32` (src/ui/ranking.rs) al abrir el panel rápido con un par cuyo
+    /// score apunta 100% a un lado: la barra se llenaba hasta `mid + mid`, que
+    /// es exactamente el ancho del buffer. Nada que ver con la posición del par
+    /// en la tabla — solo hace falta un sesgo pleno, que es más probable en los
+    /// pares de más abajo porque tienen menos componentes con dato.
+    #[test]
+    fn el_panel_rapido_no_revienta_con_sesgo_pleno() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let _g = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = app_con_datos();
+        app.view = View::Ranking;
+        // BTC solo tiene la señal de whales (100% largas) → bull 1 / avail 1
+        // → sesgo +100%, el caso que llenaba la barra hasta el borde
+        let coin = "BTC";
+        app.sel = app
+            .sorted_coins()
+            .iter()
+            .position(|c| c == coin)
+            .expect("BTC en la tabla");
+        let s = crate::flow::score(&app.score_inputs(coin));
+        assert_eq!(
+            (s.bull, s.bear, s.avail),
+            (1, 0, 1),
+            "el caso reproducido debe ser sesgo pleno"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        // sin el fix, este draw entra en panic y tumba la app entera
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+
+        let buf = term.backend().buffer().clone();
+        let mut txt = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                txt.push_str(buf.cell((x, y)).unwrap().symbol());
+            }
+            txt.push('\n');
+        }
+        assert!(txt.contains("+100%"), "sesgo pleno en pantalla:\n{txt}");
         theme::set_theme(theme::Theme::Dark);
     }
 }

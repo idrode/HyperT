@@ -10,6 +10,7 @@ pub(crate) mod oscimg;
 mod pair;
 mod ranking;
 mod search;
+mod shadow;
 mod taplot;
 pub mod theme;
 pub mod wallet;

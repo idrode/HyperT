@@ -216,6 +216,11 @@ pub struct Score {
     pub avail: u8,
 }
 
+/// Cuántos componentes puede tener el score como mucho (funding, premium,
+/// skew de whales, combustible de liquidación, CVD). `avail` cuenta los que
+/// hoy tienen dato; esta constante es el denominador honesto del "n de m".
+pub const SCORE_COMPONENTS: u8 = 5;
+
 pub fn score(inp: &ScoreInputs) -> Score {
     let mut s = Score::default();
     let mut add = |flag: Option<bool>| {
@@ -277,6 +282,21 @@ pub fn score(inp: &ScoreInputs) -> Score {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// El denominador que publica la UI no se queda atrás si algún día se
+    /// añade un componente nuevo a `score`.
+    #[test]
+    fn el_maximo_de_componentes_es_el_publicado() {
+        let todos = ScoreInputs {
+            funding_pctile: Some(50.0),
+            premium_mean_bps: Some(0.0),
+            whale_pct_long: Some(50.0),
+            liq_fuel: Some((1.0, 1.0)),
+            cvd: Some(CvdSignal::Neutro),
+        };
+        assert_eq!(score(&todos).avail, SCORE_COMPONENTS);
+        assert_eq!(score(&ScoreInputs::default()).avail, 0);
+    }
 
     #[test]
     fn percentile_needs_history() {

@@ -35,6 +35,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let h = rows.len() as u16 + 4 + if v3 { 1 } else { 0 };
     let area = super::exec::centered(46, h, f.area());
+    super::shadow::draw(f, area);
     f.render_widget(Clear, area);
     let block = Block::bordered()
         .title(tr.ind_title)
