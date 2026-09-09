@@ -15,30 +15,30 @@ use super::pair;
 use super::taplot;
 use super::theme;
 
-const TITLE: &str = " Ballenas + RSI/ADX/DMI ";
 /// Ancho reservado al eje 0-100 a la derecha del panel.
 const AXIS_W: u16 = 5;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
+    let tr = crate::i18n::t();
     let placeholder = |f: &mut Frame, msg: &'static str| {
-        f.render_widget(Paragraph::new(msg).block(theme::block().title(TITLE)), area);
+        f.render_widget(
+            Paragraph::new(msg).block(theme::block().title(tr.w3_title)),
+            area,
+        );
     };
     let ind3 = app.ind3;
     // el caché de imagen (gfx) y el par se prestan por campos disjuntos de App
     let gfx = &mut app.gfx;
     let Some(p) = app.selected_coin.as_deref().and_then(|c| app.pairs.get(c)) else {
-        placeholder(
-            f,
-            "Selecciona un par en el Ranking (Enter) o pulsa 3 de nuevo.",
-        );
+        placeholder(f, tr.w3_select_pair);
         return;
     };
     let Some(e) = &p.extra else {
-        placeholder(f, "cargando velas…");
+        placeholder(f, tr.t_loading_candles);
         return;
     };
     if e.candles.len() < 2 {
-        placeholder(f, "sin datos de velas");
+        placeholder(f, tr.t_no_candles);
         return;
     }
 
@@ -68,6 +68,7 @@ pub(super) fn rsi_zone_color(v: f64, wp: &WhaleParams) -> Color {
 }
 
 fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
+    let tr = crate::i18n::t();
     let wp = WhaleParams::default();
     let panel = &e.panel;
     let i = e.candles.len() - 1;
@@ -92,8 +93,8 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
 
     let last_trig = panel.triggers.last().map(|t| {
         let (arrow, c) = match t.side {
-            WhaleSide::Buy => ("▲ compra", theme::c().positive),
-            WhaleSide::Sell => ("▼ venta", theme::c().negative),
+            WhaleSide::Buy => (tr.w3_trig_buy, theme::c().positive),
+            WhaleSide::Sell => (tr.w3_trig_sell, theme::c().negative),
         };
         (
             format!("{arrow} int {:.1} ", t.height),
@@ -110,9 +111,10 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
         ),
         Span::styled(fmt_px(p.mid), Style::new().add_modifier(Modifier::BOLD)),
         dim(format!(
-            "  TF {} · {} velas · último disparo: ",
+            "  TF {} · {} {} ",
             e.interval.label(),
-            e.candles.len()
+            e.candles.len(),
+            tr.w3_tf_candles_last
         )),
     ];
     match last_trig {
@@ -123,7 +125,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
             ));
             l1.push(dim(age));
         }
-        None => l1.push(dim("ninguno en las velas cargadas".to_string())),
+        None => l1.push(dim(tr.w3_no_trigger_loaded.to_string())),
     }
 
     let rsi = panel.rsi[i];
@@ -149,7 +151,8 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
         dim("  −DI ".to_string()),
         colored(num(d.minus_di), theme::c().negative),
         dim(format!(
-            "   BB precio [{} … {}]",
+            "   {} [{} … {}]",
+            tr.w3_bb_price,
             px_or_dash(panel.bb_lower[i]),
             px_or_dash(panel.bb_upper[i])
         )),
@@ -167,7 +170,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     let (bb_lo, bb_up) = (panel.bb_lower[i], panel.bb_upper[i]);
     let l3 = Line::from(vec![
         Span::styled(
-            "▲ long  ",
+            tr.w3_long,
             Style::new()
                 .fg(theme::c().positive)
                 .add_modifier(Modifier::BOLD),
@@ -192,7 +195,7 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     ]);
     let l4 = Line::from(vec![
         Span::styled(
-            "▼ short ",
+            tr.w3_short,
             Style::new()
                 .fg(theme::c().negative)
                 .add_modifier(Modifier::BOLD),
@@ -217,10 +220,8 @@ fn draw_summary(f: &mut Frame, p: &PairState, e: &PairExtraData, area: Rect) {
     ]);
 
     f.render_widget(
-        Paragraph::new(vec![Line::from(l1), l2, l3, l4]).block(theme::block().title(format!(
-            " {} — whales+RSI (estimado, TA puro) ",
-            p.meta.name
-        ))),
+        Paragraph::new(vec![Line::from(l1), l2, l3, l4])
+            .block(theme::block().title(format!(" {} — {} ", p.meta.name, tr.w3_summary_title))),
         area,
     );
 }
@@ -234,6 +235,7 @@ fn draw_chart(
     ind3: crate::app::Ind3Sel,
     area: Rect,
 ) {
+    let tr = crate::i18n::t();
     let wp = WhaleParams::default();
     let panel = &e.panel;
     let n = e.candles.len();
@@ -254,12 +256,13 @@ fn draw_chart(
     if ind3.trix {
         parts.push("TRIX");
     }
-    parts.push("▲▼ ballena");
+    parts.push(tr.w3_whale_marks);
     let mut block = theme::block().title(format!(
-        " whales+RSI {} ×{} — {} — i cambia TF · o indicadores ",
+        " whales+RSI {} ×{} — {} — {} ",
         e.interval.label(),
         n - start,
         parts.join(" · "),
+        tr.w3_chart_title,
     ));
     let inner = block.inner(area);
     if inner.width < AXIS_W + 10 || inner.height < 4 {
@@ -617,9 +620,12 @@ mod tests {
         assert!(s.contains("ADX<28"), "condición ADX del checklist:\n{s}");
         // resumen con los valores numéricos (RSI/MA/%B/ADX/±DI) sigue ahí
         assert!(s.contains("RSI "), "valores del resumen:\n{s}");
-        // log de disparos con su recuento real (el cálculo no se apagó)
+        // log de disparos con su recuento real (el cálculo no se apagó).
+        // El título sale de i18n: se compone igual que en el render, para no
+        // volver a clavar el texto de un idioma concreto en el test.
+        let tr = crate::i18n::t();
         assert!(
-            s.contains(&format!("Disparos ballena — {triggers_antes} en")),
+            s.contains(&format!("{} — {triggers_antes} /", tr.w3_log_title)),
             "log de disparos con recuento {triggers_antes}:\n{s}"
         );
         // y las marcas ▲▼ siguen yendo al raster aunque no haya líneas
@@ -635,7 +641,7 @@ mod tests {
         );
         // el título del panel mantiene ▲▼ (nunca es ocultable)
         assert!(
-            s.contains("▲▼ ballena"),
+            s.contains(tr.w3_whale_marks),
             "marcas siempre en el título:\n{s}"
         );
     }
@@ -696,31 +702,61 @@ mod tests {
         }
         super::theme::set_theme(super::theme::Theme::Dark);
     }
+    /// Regresión del bug de i18n de la Vista 3: el toggle EN/ES debe cambiar
+    /// SU texto, no solo el del resto de la app. Antes de migrarla, esta vista
+    /// tenía los literales en español clavados en el código y se quedaba igual
+    /// en ambos idiomas.
+    #[test]
+    fn el_toggle_de_idioma_cambia_los_textos_de_la_vista_3() {
+        let _g = crate::ui::theme::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut app = app_vista3();
+        let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
+
+        let prev = crate::i18n::lang();
+        crate::i18n::set_lang(crate::i18n::Lang::En);
+        let en = frame(&mut term, &mut app);
+        crate::i18n::set_lang(crate::i18n::Lang::Es);
+        let es = frame(&mut term, &mut app);
+        crate::i18n::set_lang(prev);
+
+        // títulos y textos propios de la vista, en cada idioma
+        assert!(en.contains("Whale triggers"), "log en inglés:\n{en}");
+        assert!(es.contains("Disparos ballena"), "log en español:\n{es}");
+        assert!(en.contains("▲▼ whale"), "marcas en inglés:\n{en}");
+        assert!(es.contains("▲▼ ballena"), "marcas en español:\n{es}");
+        assert!(en.contains("i changes TF"), "atajos en inglés:\n{en}");
+        assert!(es.contains("i cambia TF"), "atajos en español:\n{es}");
+        assert_ne!(en, es, "la vista debe re-renderizar distinto por idioma");
+    }
 }
 
 fn draw_log(f: &mut Frame, e: &PairExtraData, area: Rect) {
+    let tr = crate::i18n::t();
     let trig = &e.panel.triggers;
     let block = theme::block().title(format!(
-        " Disparos ballena — {} en {} velas ",
+        " {} — {} / {} ",
+        tr.w3_log_title,
         trig.len(),
         e.candles.len()
     ));
     let dim = |s: &'static str| Span::styled(s, Style::new().fg(theme::c().muted));
     let mut lines: Vec<Line> = Vec::new();
     if trig.is_empty() {
-        lines.push(Line::from(dim("sin disparos en las velas cargadas")));
+        lines.push(Line::from(dim(tr.w3_log_empty)));
         lines.push(Line::raw(""));
-        lines.push(Line::from(dim("condiciones (ver checklist arriba):")));
-        lines.push(Line::from(dim("vela fuera del BB de precio + RSI")));
-        lines.push(Line::from(dim("extremo + DI contrario + ADX bajo")));
+        lines.push(Line::from(dim(tr.w3_log_conditions)));
+        lines.push(Line::from(dim(tr.w3_log_cond1)));
+        lines.push(Line::from(dim(tr.w3_log_cond2)));
     } else {
-        lines.push(Line::from(dim(" lado     int  fuera%  cierre      cuándo")));
+        lines.push(Line::from(dim(tr.w3_log_header)));
         let max_rows = (area.height.saturating_sub(3)) as usize;
         for t in trig.iter().rev().take(max_rows.max(1)) {
             let c = &e.candles[t.idx];
             let (arrow, side_txt, color) = match t.side {
-                WhaleSide::Buy => ("▲", "compra", theme::c().positive),
-                WhaleSide::Sell => ("▼", "venta ", theme::c().negative),
+                WhaleSide::Buy => ("▲", tr.w3_side_buy, theme::c().positive),
+                WhaleSide::Sell => ("▼", tr.w3_side_sell, theme::c().negative),
             };
             lines.push(Line::from(vec![
                 Span::styled(
