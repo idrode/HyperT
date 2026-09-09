@@ -2388,12 +2388,11 @@ impl App {
             KeyCode::Up => self.move_search_sel(-1),
             KeyCode::PageDown => self.move_search_sel(15),
             KeyCode::PageUp => self.move_search_sel(-15),
-            KeyCode::Char(c) if c.is_ascii_graphic() => {
-                if self.search.query.len() < 12 {
+            KeyCode::Char(c) if c.is_ascii_graphic()
+                && self.search.query.len() < 12 => {
                     self.search.query.push(c);
                     self.search.sel = 0;
                 }
-            }
             _ => {}
         }
     }
@@ -2907,11 +2906,10 @@ impl App {
             KeyCode::Backspace => {
                 self.input_buf.pop();
             }
-            KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' || c == 'X' => {
-                if self.input_buf.len() < 42 {
+            KeyCode::Char(c) if (c.is_ascii_hexdigit() || c == 'x' || c == 'X')
+                && self.input_buf.len() < 42 => {
                     self.input_buf.push(c);
                 }
-            }
             _ => {}
         }
     }
@@ -3942,11 +3940,10 @@ impl App {
                     KeyCode::Backspace => {
                         buf.pop();
                     }
-                    KeyCode::Char(ch) => {
-                        if buf.len() < exec::MAINNET_PHRASE.len() {
+                    KeyCode::Char(ch)
+                        if buf.len() < exec::MAINNET_PHRASE.len() => {
                             buf.push(ch.to_ascii_uppercase());
                         }
-                    }
                     _ => {}
                 }
                 return;
