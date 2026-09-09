@@ -357,6 +357,115 @@ impl Default for WhaleParams {
     }
 }
 
+// ── Divergencia precio/RSI ──────────────────────────────────────────────────
+//
+// Pieza pedida por la especificación del consenso ponderado (Vista 6): señal
+// INDEPENDIENTE de la divergencia CVD/precio que ya vive en `flow.rs` — aquella
+// compara volumen acumulado contra precio, esta compara el RSI contra precio.
+// Ambas deben poder coexistir en el score.
+//
+// Método clásico (el mismo del indicador de divergencias de TradingView): se
+// buscan pivotes en el OSCILADOR, no en el precio, y el precio se lee en esas
+// mismas velas. Un pivote solo se confirma cuando han cerrado `right` velas
+// después, así que las últimas `right` velas nunca pueden tener un pivote —
+// honestidad de datos: no se adivina un pivote a medio formar.
+
+/// Velas a cada lado que debe superar un pivote para confirmarse.
+pub const DIV_LEFT: usize = 5;
+pub const DIV_RIGHT: usize = 5;
+/// Separación admitida entre los dos pivotes comparados, en velas. Demasiado
+/// juntos = ruido; demasiado lejos = ya no es la misma estructura de mercado.
+pub const DIV_MIN_SPAN: usize = 5;
+pub const DIV_MAX_SPAN: usize = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DivKind {
+    /// Precio hace mínimo más BAJO y el RSI mínimo más ALTO → sesgo alcista.
+    Bullish,
+    /// Precio hace máximo más ALTO y el RSI máximo más BAJO → sesgo bajista.
+    Bearish,
+}
+
+/// Divergencia confirmada entre dos pivotes del RSI (índices en las series de
+/// entrada, `from` < `to`). Los valores son los del RSI en esos pivotes: son
+/// los que traza la línea del panel del oscilador.
+#[derive(Debug, Clone, Copy)]
+pub struct Divergence {
+    pub from: usize,
+    pub to: usize,
+    pub from_rsi: f64,
+    pub to_rsi: f64,
+    pub kind: DivKind,
+}
+
+/// Índices de pivotes de una serie: máximos locales si `high`, mínimos si no.
+/// Un pivote i debe ser estrictamente mejor que las `left` velas anteriores y
+/// al menos tan bueno como las `right` posteriores (empates a la derecha no
+/// invalidan, criterio de Pine `ta.pivothigh`/`ta.pivotlow`). NaN nunca es
+/// pivote ni participa en la comparación: un warmup a medias no inventa uno.
+pub fn pivots(vals: &[f64], left: usize, right: usize, high: bool) -> Vec<usize> {
+    let mut out = Vec::new();
+    if vals.len() <= left + right {
+        return out;
+    }
+    let better = |a: f64, b: f64| if high { a > b } else { a < b };
+    let not_worse = |a: f64, b: f64| if high { a >= b } else { a <= b };
+    for i in left..vals.len() - right {
+        let v = vals[i];
+        if !v.is_finite() {
+            continue;
+        }
+        let l_ok = (i - left..i).all(|j| vals[j].is_finite() && better(v, vals[j]));
+        let r_ok = (i + 1..=i + right).all(|j| vals[j].is_finite() && not_worse(v, vals[j]));
+        if l_ok && r_ok {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Divergencias precio/RSI sobre pivotes CONSECUTIVOS del RSI, separados entre
+/// `DIV_MIN_SPAN` y `DIV_MAX_SPAN` velas. `closes` y `rsi` deben estar
+/// alineados 1:1 (misma longitud); si no lo están, devuelve vacío en vez de
+/// comparar velas desalineadas.
+pub fn rsi_divergences(closes: &[f64], rsi: &[f64]) -> Vec<Divergence> {
+    let mut out = Vec::new();
+    if closes.len() != rsi.len() {
+        return out;
+    }
+    for (high, kind) in [(false, DivKind::Bullish), (true, DivKind::Bearish)] {
+        let pv = pivots(rsi, DIV_LEFT, DIV_RIGHT, high);
+        for w in pv.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let span = b - a;
+            if !(DIV_MIN_SPAN..=DIV_MAX_SPAN).contains(&span) {
+                continue;
+            }
+            let (pa, pb) = (closes[a], closes[b]);
+            if !pa.is_finite() || !pb.is_finite() {
+                continue;
+            }
+            let hit = match kind {
+                // precio mínimo más bajo, RSI mínimo más alto
+                DivKind::Bullish => pb < pa && rsi[b] > rsi[a],
+                // precio máximo más alto, RSI máximo más bajo
+                DivKind::Bearish => pb > pa && rsi[b] < rsi[a],
+            };
+            if hit {
+                out.push(Divergence {
+                    from: a,
+                    to: b,
+                    from_rsi: rsi[a],
+                    to_rsi: rsi[b],
+                    kind,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|d| d.to);
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhaleSide {
     Buy,
@@ -754,5 +863,99 @@ mod tests {
         // dist 0 → altura mínima 0.1×escala = 1; dist 20% → 200, capada a 95
         assert_eq!((0.0f64.max(0.1) * p.whale_scale).min(p.whale_cap), 1.0);
         assert_eq!((20.0f64.max(0.1) * p.whale_scale).min(p.whale_cap), 95.0);
+    }
+}
+
+#[cfg(test)]
+mod div_tests {
+    use super::*;
+
+    /// Serie con un mínimo claro en el índice 6 y nada más: solo ese índice
+    /// puede ser pivote (los 5 primeros y los 5 últimos nunca se confirman).
+    #[test]
+    fn pivote_bajo_confirmado_solo_con_ambos_lados() {
+        let v = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 1.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        assert_eq!(pivots(&v, 5, 5, false), vec![6]);
+        // la misma serie no tiene ningún máximo local confirmable
+        assert!(pivots(&v, 5, 5, true).is_empty());
+    }
+
+    #[test]
+    fn pivote_sin_velas_a_la_derecha_no_se_confirma() {
+        // mínimo en el último índice: faltan las 5 velas de confirmación
+        let v = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+        assert!(pivots(&v, 5, 5, false).is_empty());
+    }
+
+    #[test]
+    fn nan_de_warmup_nunca_es_pivote() {
+        let mut v = vec![f64::NAN; 6];
+        v.extend([1.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        // el índice 6 vale 1.0 pero sus 5 velas izquierdas son NaN
+        assert!(pivots(&v, 5, 5, false).is_empty());
+    }
+
+    /// Caso construido a mano: dos valles de RSI (idx 6 y 18). El precio hace
+    /// mínimo MÁS BAJO en el segundo, el RSI mínimo MÁS ALTO → alcista.
+    #[test]
+    fn divergencia_alcista_precio_baja_rsi_sube() {
+        let mut rsi = vec![50.0; 25];
+        let mut closes = vec![100.0; 25];
+        for (i, v) in [(6usize, 20.0), (18, 30.0)] {
+            rsi[i] = v;
+        }
+        closes[6] = 90.0;
+        closes[18] = 85.0;
+        let d = rsi_divergences(&closes, &rsi);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, DivKind::Bullish);
+        assert_eq!((d[0].from, d[0].to), (6, 18));
+        assert_eq!((d[0].from_rsi, d[0].to_rsi), (20.0, 30.0));
+    }
+
+    #[test]
+    fn divergencia_bajista_precio_sube_rsi_baja() {
+        let mut rsi = vec![50.0; 25];
+        let mut closes = vec![100.0; 25];
+        rsi[6] = 80.0;
+        rsi[18] = 70.0;
+        closes[6] = 110.0;
+        closes[18] = 115.0;
+        let d = rsi_divergences(&closes, &rsi);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, DivKind::Bearish);
+        assert_eq!((d[0].from, d[0].to), (6, 18));
+    }
+
+    #[test]
+    fn confirmacion_no_es_divergencia() {
+        // precio y RSI se mueven en el MISMO sentido: no hay divergencia
+        let mut rsi = vec![50.0; 25];
+        let mut closes = vec![100.0; 25];
+        rsi[6] = 30.0;
+        rsi[18] = 20.0;
+        closes[6] = 90.0;
+        closes[18] = 85.0;
+        assert!(rsi_divergences(&closes, &rsi).is_empty());
+    }
+
+    #[test]
+    fn pivotes_demasiado_lejos_no_se_comparan() {
+        let n = DIV_MAX_SPAN + 30;
+        let mut rsi = vec![50.0; n];
+        let mut closes = vec![100.0; n];
+        let (a, b) = (6, 6 + DIV_MAX_SPAN + 1);
+        rsi[a] = 20.0;
+        rsi[b] = 30.0;
+        closes[a] = 90.0;
+        closes[b] = 85.0;
+        assert!(rsi_divergences(&closes, &rsi).is_empty());
+    }
+
+    #[test]
+    fn series_desalineadas_no_producen_señal() {
+        let rsi = vec![50.0; 25];
+        let closes = vec![100.0; 24];
+        assert!(rsi_divergences(&closes, &rsi).is_empty());
     }
 }

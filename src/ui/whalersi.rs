@@ -406,6 +406,7 @@ fn draw_chart(
         lines,
         bars,
         marks,
+        segs: vec![],
     };
     oscimg::draw_into(
         f,

@@ -559,6 +559,9 @@ pub struct PairExtraData {
     /// TRIX(18) alineado 1:1 con las velas (NaN = warmup). Confirmación
     /// secundaria opcional en Vistas 2 y 3; no alimenta ningún disparo.
     pub trix: Vec<f64>,
+    /// Divergencias precio/RSI confirmadas (índices sobre `candles`). Se
+    /// calculan con el resto del TA, no por frame de render.
+    pub divs: Vec<signals::Divergence>,
     pub fetched: Instant,
     /// Solo avanza cuando las velas realmente cambian: es la clave de caché de
     /// los paneles raster (Vistas 2 y 3) — un re-fetch periódico con datos
@@ -1136,6 +1139,8 @@ pub struct IndSel {
     pub rsi: bool,
     pub adx_dmi: bool,
     pub trix: bool,
+    /// Líneas de divergencia precio/RSI sobre los pivotes del RSI.
+    pub div: bool,
 }
 
 impl Default for IndSel {
@@ -1145,6 +1150,7 @@ impl Default for IndSel {
             rsi: true,
             adx_dmi: true,
             trix: false,
+            div: false,
         }
     }
 }
@@ -1153,7 +1159,10 @@ impl IndSel {
     /// Clave de invalidación del raster: la imagen debe re-rasterizarse si
     /// cambia la selección aunque las velas (stamp) no hayan cambiado.
     pub fn mask(&self) -> u64 {
-        (self.rsi as u64) | (self.adx_dmi as u64) << 1 | (self.trix as u64) << 2
+        (self.rsi as u64)
+            | (self.adx_dmi as u64) << 1
+            | (self.trix as u64) << 2
+            | (self.div as u64) << 3
     }
 }
 
@@ -1727,12 +1736,14 @@ impl App {
                         &signals::WhaleParams::default(),
                     );
                     let trix = signals::trix_series(&closes, signals::TRIX_PERIOD);
+                    let divs = signals::rsi_divergences(&closes, &panel.rsi);
                     p.extra = Some(PairExtraData {
                         interval,
                         rsi: panel.last_rsi(),
                         dmi: panel.last_dmi(),
                         panel,
                         trix,
+                        divs,
                         candles,
                         funding_hist,
                         fetched: Instant::now(),
@@ -2581,7 +2592,8 @@ impl App {
     pub fn ind_rows(&self) -> usize {
         match self.view {
             View::WhaleRsi => 4,
-            _ => 3,
+            // Vista 2: RSI+MA, ADX/±DI, TRIX, divergencia precio/RSI
+            _ => 4,
         }
     }
 
@@ -2601,6 +2613,7 @@ impl App {
                 (_, 0) => self.ind.rsi = !self.ind.rsi,
                 (_, 1) => self.ind.adx_dmi = !self.ind.adx_dmi,
                 (_, 2) => self.ind.trix = !self.ind.trix,
+                (View::Pair, 3) => self.ind.div = !self.ind.div,
                 _ => {}
             },
             _ => {}
@@ -4642,7 +4655,13 @@ mod tests {
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter); // enciende TRIX (fila 2)
         assert!(app.ind.trix && app.ind.adx_dmi);
-        // el ciclo de filas envuelve
+        // fila 3: divergencia precio/RSI, apagada por defecto
+        assert!(!app.ind.div);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.ind.div);
+        // el ciclo de filas envuelve (4 filas en Vista 2)
+        assert_eq!(app.ind_rows(), 4);
         press(&mut app, KeyCode::Down);
         assert_eq!(app.ind_ui, Some(0));
         press(&mut app, KeyCode::Esc);

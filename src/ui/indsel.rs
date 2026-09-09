@@ -30,6 +30,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             (tr.ind_rsi_label.to_string(), app.ind.rsi, Some(0)),
             (tr.ind_adx_label.to_string(), app.ind.adx_dmi, Some(1)),
             (trix_label, app.ind.trix, Some(2)),
+            (tr.ind_div_label.to_string(), app.ind.div, Some(3)),
         ]
     };
 

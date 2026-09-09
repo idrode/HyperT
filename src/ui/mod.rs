@@ -66,25 +66,30 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(30)]).split(area);
 
+    // Pestaña activa vs. inactivas: mismos tonos que las cabeceras de columna
+    // del resto de vistas (`header_active`/`header_idle`), sobre el fondo de
+    // selección del tema para que la activa se lea como "pestaña pulsada" sin
+    // invertir a un bloque de color ajeno a la paleta.
+    let p = theme::c();
     let tab = |label: &str, active: bool| {
         if active {
             Span::styled(
                 format!(" {label} "),
                 Style::new()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(p.header_active)
+                    .bg(p.selection_bg)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(format!(" {label} "), Style::new().fg(Color::Gray))
+            Span::styled(
+                format!(" {label} "),
+                Style::new().fg(p.header_idle).bg(p.bg),
+            )
         }
     };
     let s = crate::i18n::t();
     let left = Line::from(vec![
-        Span::styled(
-            " hyperT ",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(" hyperT ", theme::title_style()),
         tab(&format!("1 {}", s.tab_ranking), app.view == View::Ranking),
         tab(&format!("2 {}", s.tab_pair), app.view == View::Pair),
         tab(&format!("3 {}", s.tab_brsi), app.view == View::WhaleRsi),
@@ -95,14 +100,14 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         tab(&format!("8 {}", s.tab_funds), app.view == View::Funds),
         tab(&format!("9 {}", s.tab_wallet), app.view == View::Wallet),
     ]);
-    f.render_widget(Paragraph::new(left), cols[0]);
+    f.render_widget(Paragraph::new(left).style(theme::base()), cols[0]);
 
     // ● solo si además de conectado hay mensajes recientes: una suscripción
     // perdida en silencio debe verse como ○ aunque el socket siga abierto
     let ws = if app.ws_ok && app.ws_fresh() {
-        Span::styled("WS ●", Style::new().fg(Color::Green))
+        Span::styled("WS ●", Style::new().fg(p.positive).bg(p.bg))
     } else {
-        Span::styled("WS ○", Style::new().fg(Color::Red))
+        Span::styled("WS ○", Style::new().fg(p.negative).bg(p.bg))
     };
     let ws_age = match app.last_ws_at {
         Some(t) => format!(" {}s", t.elapsed().as_secs()),
@@ -113,13 +118,18 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         None => "  ctx — ".to_string(),
     };
     let right = Line::from(vec![
-        Span::styled(app.net_label, Style::new().fg(Color::Yellow)),
-        Span::raw("  "),
+        Span::styled(app.net_label, theme::title_style()),
+        Span::styled("  ", Style::new().bg(p.bg)),
         ws,
-        Span::styled(ws_age, Style::new().fg(Color::DarkGray)),
-        Span::styled(age, Style::new().fg(Color::DarkGray)),
+        Span::styled(ws_age, Style::new().fg(p.muted).bg(p.bg)),
+        Span::styled(age, Style::new().fg(p.muted).bg(p.bg)),
     ]);
-    f.render_widget(Paragraph::new(right).alignment(Alignment::Right), cols[1]);
+    f.render_widget(
+        Paragraph::new(right)
+            .style(theme::base())
+            .alignment(Alignment::Right),
+        cols[1],
+    );
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
@@ -153,7 +163,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     };
     let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(err_w)]).split(area);
     f.render_widget(
-        Paragraph::new(Span::styled(hint, Style::new().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(hint, Style::new().fg(theme::c().muted))).style(theme::base()),
         cols[0],
     );
     if let Some(err) = &app.last_err {
@@ -163,7 +173,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             msg.push('…');
         }
         f.render_widget(
-            Paragraph::new(Span::styled(msg, Style::new().fg(Color::Red)))
+            Paragraph::new(Span::styled(msg, Style::new().fg(theme::c().negative)))
+                .style(theme::base())
                 .alignment(Alignment::Right),
             cols[1],
         );

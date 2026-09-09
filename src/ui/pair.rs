@@ -489,6 +489,16 @@ fn draw_ta_panel(
                 " · TRIX —".to_string()
             };
         }
+        // la divergencia se anota en la vela del pivote que la confirma (el
+        // final del segmento), que es donde el usuario la ve cerrarse
+        if ind.div {
+            if let Some(d) = e.divs.iter().find(|d| d.to == i) {
+                txt += match d.kind {
+                    crate::signals::DivKind::Bullish => crate::i18n::t().pr_div_bull,
+                    crate::signals::DivKind::Bearish => crate::i18n::t().pr_div_bear,
+                };
+            }
+        }
         txt.push(' ');
         block = block.title_bottom(txt);
     }
@@ -538,6 +548,24 @@ fn draw_ta_panel(
             color: LineColor::ByValue(&zone),
         });
     }
+    // líneas de divergencia precio/RSI: unen los DOS pivotes del RSI que la
+    // originan, en las coordenadas del propio RSI (por eso van en el panel del
+    // oscilador y no sobre las velas). Verde = alcista, coral = bajista, los
+    // mismos tonos semánticos del tema que el resto de la app.
+    let segs = if ind.div {
+        e.divs
+            .iter()
+            .map(|d| {
+                let col = match d.kind {
+                    crate::signals::DivKind::Bullish => oscimg::green(),
+                    crate::signals::DivKind::Bearish => oscimg::red(),
+                };
+                (d.from, d.from_rsi, d.to, d.to_rsi, col)
+            })
+            .collect()
+    } else {
+        vec![]
+    };
     let spec = OscSpec {
         start,
         len: n - start,
@@ -548,6 +576,7 @@ fn draw_ta_panel(
         lines,
         bars: vec![],
         marks: vec![],
+        segs,
     };
     oscimg::draw_into(
         f,

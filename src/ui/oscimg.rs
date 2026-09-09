@@ -199,6 +199,11 @@ pub(super) struct OscSpec<'a> {
     pub bars: Vec<(usize, f64, RGBColor)>,
     /// Marcas ▲▼: (índice absoluto, es compra). Compra abajo, venta arriba.
     pub marks: Vec<(usize, bool)>,
+    /// Segmentos rectos entre dos puntos de la serie, en coordenadas de datos:
+    /// (idx_a, valor_a, idx_b, valor_b, color). Los usan las líneas de
+    /// divergencia precio/RSI para unir los dos pivotes del RSI. Se pintan
+    /// ENCIMA de las líneas para que no queden tapados por el trazo del RSI.
+    pub segs: Vec<(usize, f64, usize, f64, RGBColor)>,
 }
 
 /// Contador de re-rasterizaciones (solo tests): evidencia directa de cuándo
@@ -437,6 +442,27 @@ fn raster(pw: u32, ph: u32, cell_w: u32, spec: &OscSpec) -> RgbImage {
             draw_line(&mut chart, spec, line, &x_of);
         }
 
+        // segmentos de divergencia, encima del trazo del oscilador. Basta con
+        // que el pivote FINAL esté en la ventana: el inicial puede caer a la
+        // izquierda del borde y plotters recorta el trozo que sobra (así una
+        // divergencia recién confirmada no desaparece al hacer scroll).
+        let x_rel =
+            |idx: usize| (idx as f64 - spec.start as f64) * spec.cols_per_pt + spec.half_cols;
+        for &(a, va, b, vb, col) in spec.segs.iter().filter(|(_, _, b, ..)| visible(*b)) {
+            if !va.is_finite() || !vb.is_finite() {
+                continue;
+            }
+            chart
+                .draw_series(std::iter::once(PathElement::new(
+                    [
+                        (x_rel(a) * cell_w as f64, va),
+                        (x_rel(b) * cell_w as f64, vb),
+                    ],
+                    col.stroke_width(2 * SS),
+                )))
+                .unwrap();
+        }
+
         // marcas ▲ (compra, abajo) / ▼ (venta, arriba), encima del trazo
         for &(idx, buy) in spec.marks.iter().filter(|(i, _)| visible(*i)) {
             let x = x_of(idx - spec.start);
@@ -514,4 +540,42 @@ fn draw_line(chart: &mut OscChart, spec: &OscSpec, line: &OscLine, x_of: &dyn Fn
         run.push(pt);
     }
     flush(&mut run, run_color, chart);
+}
+
+#[cfg(test)]
+mod seg_tests {
+    use super::*;
+
+    fn spec_with(segs: Vec<(usize, f64, usize, f64, RGBColor)>) -> OscSpec<'static> {
+        OscSpec {
+            start: 0,
+            len: 40,
+            cols_per_pt: 2.0,
+            half_cols: 0.5,
+            oversold: 30.0,
+            overbought: 70.0,
+            lines: vec![],
+            bars: vec![],
+            marks: vec![],
+            segs,
+        }
+    }
+
+    /// El segmento de divergencia llega de verdad a los píxeles: mismo panel
+    /// con y sin `segs` no puede dar la misma imagen.
+    #[test]
+    fn el_segmento_cambia_el_raster() {
+        let vacio = raster(160, 80, 2, &spec_with(vec![]));
+        let con = raster(160, 80, 2, &spec_with(vec![(2, 25.0, 30, 40.0, green())]));
+        assert_ne!(vacio.as_raw(), con.as_raw());
+    }
+
+    /// Un segmento cuyo pivote final cae fuera de la ventana visible no se
+    /// pinta (no se inventa una divergencia fuera de pantalla).
+    #[test]
+    fn segmento_fuera_de_ventana_no_se_pinta() {
+        let vacio = raster(160, 80, 2, &spec_with(vec![]));
+        let fuera = raster(160, 80, 2, &spec_with(vec![(80, 25.0, 120, 40.0, green())]));
+        assert_eq!(vacio.as_raw(), fuera.as_raw());
+    }
 }
