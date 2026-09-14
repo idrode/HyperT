@@ -1,5 +1,6 @@
 pub mod backfill;
 pub mod opens;
+pub mod polymarket;
 pub mod types;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -181,7 +182,7 @@ fn abi_word_f64(hex: &str) -> Option<f64> {
     })
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -212,7 +213,11 @@ pub fn spawn_data_tasks(
     tokio::spawn(whale_watcher(base, tx.clone()));
     tokio::spawn(spot_watcher(base, tx.clone(), usdc_rx.clone()));
     tokio::spawn(usdc_watcher(tx.clone(), usdc_rx));
-    tokio::spawn(wallet_watcher(base, tx, wallet_rx));
+    tokio::spawn(wallet_watcher(base, tx.clone(), wallet_rx));
+    // Contexto macro del widget de la Vista 6. API de un tercero
+    // (Polymarket), así que va aparte y en silencio: si no responde, no se
+    // nota en el resto de la app.
+    polymarket::spawn(tx);
 }
 
 async fn new_client_retrying(base: BaseUrl, tx: &UnboundedSender<DataMsg>) -> InfoClient {

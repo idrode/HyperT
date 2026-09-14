@@ -20,10 +20,140 @@ use super::theme;
 /// Altura del panel de posicionamiento (6 líneas + bordes).
 const PANEL_H: u16 = 9;
 
+/// Ancho del widget del FOMC. Fijo: es una ficha de contexto, no debe crecer
+/// a costa del panel de posicionamiento, que es el contenido real de la vista.
+const FED_W: u16 = 30;
+/// Por debajo de esto el panel de posicionamiento se quedaría ilegible, así
+/// que el widget de contexto cede el sitio y no se dibuja.
+const FED_MIN_REST: u16 = 60;
+
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = Layout::vertical([Constraint::Min(8), Constraint::Length(PANEL_H)]).split(area);
     draw_rotation(f, app, rows[0]);
-    draw_positioning(f, app, rows[1]);
+
+    // El widget del FOMC ocupa el hueco izquierdo de la fila inferior; el
+    // panel de posicionamiento sigue a su derecha con el resto del ancho.
+    if rows[1].width >= FED_W + FED_MIN_REST {
+        let cols =
+            Layout::horizontal([Constraint::Length(FED_W), Constraint::Min(0)]).split(rows[1]);
+        draw_fed(f, app, cols[0]);
+        draw_positioning(f, app, cols[1]);
+    } else {
+        draw_positioning(f, app, rows[1]);
+    }
+}
+
+/// Widget de contexto macro: probabilidades de la próxima decisión del FOMC
+/// según Polymarket.
+///
+/// Tres reglas deliberadas, en orden de importancia:
+///
+/// 1. La etiqueta **Polymarket** va SIEMPRE en el título. Esto es el precio de
+///    un mercado de predicción, no el FedWatch del CME (que sale de los
+///    futuros de fondos federales); no son lo mismo y no tienen por qué
+///    coincidir. El pie lo repite en texto para que no dependa de que alguien
+///    interprete bien el título.
+/// 2. El dato NO entra en el score compuesto ni en ninguna señal — es contexto
+///    aparte, y por eso vive en su propio panel en vez de como una línea más
+///    del panel de posicionamiento.
+/// 3. NO se usan los colores `positive`/`negative` del tema. En esta app esos
+///    dos tonos significan long/short y ganancia/pérdida; pintar "bajada de
+///    tipos" de verde sería colar una recomendación direccional dentro de algo
+///    que es explícitamente informativo. Se usan acentos neutros.
+fn draw_fed(f: &mut Frame, app: &App, area: Rect) {
+    let tr = crate::i18n::t();
+    let block = theme::block().title(tr.fl_fed_title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(o) = &app.fed_odds else {
+        // sin dato: se dice cuál es el estado, no se deja el hueco en blanco
+        f.render_widget(
+            Paragraph::new(Line::from(dim(tr.fl_fed_waiting.into()))),
+            inner,
+        );
+        return;
+    };
+
+    let mut lines = vec![fed_date_line(o), fed_headline(o)];
+    lines.push(Line::from(""));
+    let (cut, hold, hike) = o.totals();
+    lines.push(fed_row(tr.fl_fed_cut, cut, theme::c().accent_cyan));
+    lines.push(fed_row(tr.fl_fed_hold, hold, theme::c().neutral));
+    lines.push(fed_row(tr.fl_fed_hike, hike, theme::c().accent_amber));
+    lines.push(Line::from(dim(tr.fl_fed_note.into())));
+    lines.truncate(inner.height as usize);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn fed_date_line(o: &crate::data::polymarket::FedOdds) -> Line<'static> {
+    let (_, m, d) = o.meeting_ymd();
+    let month = MONTHS
+        .get(m.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or("—");
+    let days = o.days_until(crate::data::now_ms());
+    Line::from(vec![
+        Span::styled(
+            format!("{month} {d}"),
+            Style::new()
+                .fg(theme::c().fg_strong)
+                .add_modifier(Modifier::BOLD),
+        ),
+        dim(format!("  ·  {days}d")),
+    ])
+}
+
+/// Titular: el tramo más probable, en grande y solo. El desglose completo va
+/// debajo, secundario — mismo criterio de "un número claro primero" que pide
+/// el CLAUDE.md para los indicadores compuestos.
+fn fed_headline(o: &crate::data::polymarket::FedOdds) -> Line<'static> {
+    use crate::data::polymarket::FedKind;
+    let tr = crate::i18n::t();
+    let Some(b) = o.top() else {
+        return Line::from(dim(tr.fl_fed_unavailable.into()));
+    };
+    let what = match b.kind {
+        FedKind::Cut => tr.fl_fed_cut,
+        FedKind::NoChange => tr.fl_fed_hold,
+        FedKind::Hike => tr.fl_fed_hike,
+    };
+    let mag = match b.bps {
+        Some(v) => format!(" {v}{}bp", if b.bps_plus { "+" } else { "" }),
+        None => String::new(),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{what}{mag}"),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        dim(" ".to_string()),
+        Span::styled(
+            format!("{:.0}%", b.prob * 100.0),
+            Style::new()
+                .fg(theme::c().fg_strong)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+/// Una fila del desglose, con barra de bloques para leerla de un vistazo.
+fn fed_row(label: &str, p: f64, color: Color) -> Line<'static> {
+    const BAR_W: usize = 10;
+    let filled = ((p * BAR_W as f64).round() as usize).min(BAR_W);
+    Line::from(vec![
+        dim(format!("{label:<11}")),
+        Span::styled("█".repeat(filled), Style::new().fg(color)),
+        Span::styled(
+            "·".repeat(BAR_W - filled),
+            Style::new().fg(theme::c().no_data),
+        ),
+        Span::styled(format!(" {:>3.0}%", p * 100.0), Style::new().fg(color)),
+    ])
 }
 
 fn fmt_usd_signed(v: Option<f64>) -> String {
@@ -553,6 +683,110 @@ mod tests {
             })
             .collect();
         app
+    }
+
+    fn pantalla(term: &mut Terminal<TestBackend>, app: &mut App) -> String {
+        term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    fn odds_de_prueba() -> crate::data::polymarket::FedOdds {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/polymarket_fed_events.json"
+        ))
+        .unwrap();
+        crate::data::polymarket::parse_events(&fixture, 1_789_344_000_000).unwrap()
+    }
+
+    /// Requisito duro y no negociable del widget: la procedencia del dato
+    /// ("Polymarket") tiene que estar SIEMPRE a la vista, y en ningún caso
+    /// puede presentarse como FedWatch — son dos cosas distintas.
+    #[test]
+    fn el_widget_del_fomc_siempre_se_atribuye_a_polymarket() {
+        let _g = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = app_con_datos();
+        app.view = View::Flow;
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        // incluso antes de que llegue el primer dato, la ficha ya se identifica
+        let vacio = pantalla(&mut term, &mut app);
+        assert!(vacio.contains("Polymarket"), "sin atribución:\n{vacio}");
+
+        app.apply_msg(crate::data::types::DataMsg::FedOdds(odds_de_prueba()));
+        let lleno = pantalla(&mut term, &mut app);
+        assert!(lleno.contains("Polymarket"), "sin atribución:\n{lleno}");
+        // "FedWatch" solo puede aparecer negado (el descargo del pie), nunca
+        // como etiqueta del dato
+        for m in lleno.match_indices("FedWatch") {
+            let antes = &lleno[m.0.saturating_sub(4)..m.0];
+            assert!(
+                antes.contains("not ") || antes.contains("no "),
+                "FedWatch sin negar en {:?}:\n{lleno}",
+                antes
+            );
+        }
+        // fecha de la reunión y desglose de los tres sentidos
+        assert!(lleno.contains("Sep 16"), "falta la fecha:\n{lleno}");
+        // titular = tramo más probable (25bp de subida, 0.785) y desglose
+        assert!(lleno.contains("Hike 25bp"), "falta el titular:\n{lleno}");
+        assert!(lleno.contains("20%"), "falta el tramo de sin cambio:\n{lleno}");
+        // el pie repite la atribución en texto, no solo en el borde
+        assert!(lleno.contains("not FedWatch"), "falta el pie:\n{lleno}");
+
+        // en español debe seguir atribuido igual
+        crate::i18n::set_lang(crate::i18n::Lang::Es);
+        let es = pantalla(&mut term, &mut app);
+        crate::i18n::set_lang(crate::i18n::Lang::En);
+        assert!(es.contains("Polymarket"), "sin atribución en ES:\n{es}");
+        assert!(es.contains("Sin cambio"), "sin traducir:\n{es}");
+    }
+
+    /// El dato de Polymarket es contexto DESACOPLADO: recibirlo no puede mover
+    /// ni un dígito del score compuesto ni del resto del panel.
+    #[test]
+    fn el_dato_del_fomc_no_toca_el_score_compuesto() {
+        let _g = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = app_con_datos();
+        let antes: Vec<_> = ["BTC", "ETH", "SOL"]
+            .iter()
+            .map(|c| crate::flow::score(&app.score_inputs(c)))
+            .collect();
+
+        app.apply_msg(crate::data::types::DataMsg::FedOdds(odds_de_prueba()));
+
+        let despues: Vec<_> = ["BTC", "ETH", "SOL"]
+            .iter()
+            .map(|c| crate::flow::score(&app.score_inputs(c)))
+            .collect();
+        assert_eq!(antes, despues, "el score no debe depender del FOMC");
+    }
+
+    /// En un terminal estrecho el widget de contexto cede el sitio: el panel
+    /// de posicionamiento es el contenido real de la vista y no puede quedar
+    /// aplastado por una ficha informativa.
+    #[test]
+    fn en_terminal_estrecho_el_widget_cede_el_sitio() {
+        let _g = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut app = app_con_datos();
+        app.view = View::Flow;
+        app.apply_msg(crate::data::types::DataMsg::FedOdds(odds_de_prueba()));
+
+        let mut ancho = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        assert!(pantalla(&mut ancho, &mut app).contains("Polymarket"));
+
+        let mut estrecho = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let s = pantalla(&mut estrecho, &mut app);
+        assert!(!s.contains("Polymarket"), "debería haber cedido:\n{s}");
+        // y el panel que sí importa sigue ahí
+        assert!(s.contains("Funding") || s.contains("funding"), "{s}");
     }
 
     /// Las Vistas 6, 7, 8 y 9 ya no pintan con la paleta ANSI del terminal:

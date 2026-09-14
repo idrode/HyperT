@@ -151,7 +151,7 @@ pub async fn resolve(
         scan.floor = oldest;
     }
     // `position_open_time` espera el orden de userFills: más reciente primero.
-    fills.sort_by(|a, b| b.time_ms.cmp(&a.time_ms));
+    fills.sort_by_key(|a| std::cmp::Reverse(a.time_ms));
     for (coin, szi, _) in &scan.want.clone() {
         if let Some((ms, true)) = crate::ui::wallet::position_open_time(&fills, coin, *szi) {
             scan.out.insert(

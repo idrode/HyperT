@@ -1230,6 +1230,11 @@ pub struct App {
     /// al cerrarse — ver la nota del artefacto Kitty en `Tui::run`.
     pub overlay_drawn: std::cell::Cell<bool>,
     pub ws_ok: bool,
+    /// Probabilidades de la próxima decisión del FOMC (Polymarket), contexto
+    /// del widget de la Vista 6. `None` hasta que llega la primera respuesta —
+    /// y se queda en `None` si la API no es alcanzable, sin afectar a nada más.
+    /// DESACOPLADO: no entra en `flow::score` ni en ninguna otra señal.
+    pub fed_odds: Option<crate::data::polymarket::FedOdds>,
     pub last_ctx_at: Option<Instant>,
     pub last_err: Option<String>,
     pub should_quit: bool,
@@ -1515,6 +1520,7 @@ impl App {
             ind_ui: None,
             overlay_drawn: std::cell::Cell::new(false),
             ws_ok: false,
+            fed_odds: None,
             last_ctx_at: None,
             last_err: None,
             should_quit: false,
@@ -1914,6 +1920,7 @@ impl App {
                 }
             }
             DataMsg::Transfer(s) => self.transfer = Some(s),
+            DataMsg::FedOdds(o) => self.fed_odds = Some(o),
             DataMsg::WsStatus(ok) => self.ws_ok = ok,
             DataMsg::RestError(e) => self.last_err = Some(e),
         }

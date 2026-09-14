@@ -453,6 +453,9 @@ pub enum DataMsg {
         oi: Vec<BackfillOi>,
         delta: Vec<BackfillDelta>,
     },
+    /// Probabilidades de la próxima decisión del FOMC según Polymarket
+    /// (Vista 6). Contexto informativo, DESACOPLADO del score compuesto.
+    FedOdds(super::polymarket::FedOdds),
     WsStatus(bool),
     RestError(String),
 }
